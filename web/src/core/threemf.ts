@@ -367,6 +367,9 @@ const enc = new TextEncoder();
  * Paint mode: one ExportObject per model object, keeping its structure — each model part as a
  * normal part on extruder 1 (original name), plus, for each region with index >= 1 whose modifier
  * prism survived the crop to this object, a modifier part on extruder index + 1 (named with the hex).
+ * Paint mode with per-part modifiers (regions carry `partMeshes`): instead emit one ExportObject per
+ * input PART (named after the part), each with that part as the normal part plus its part-cropped
+ * modifiers, so the texture moves/rotates with the part in Bambu.
  * `hexes` (one per region) override the region colors (user-edited swatches).
  */
 export function objectsFromResult(result: Result, hexes: string[], imageName: string): ExportObject[] {
@@ -375,6 +378,28 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
   if (result.mode === 'paint') {
     if (!result.model) throw new Error('paint mode result has no model');
     const baseColor = colorOf(0, result.regions[0]?.hex);
+
+    // Per-part mode (params.perPart): one output object per input PART (across all input objects), each
+    // carrying its own cropped modifiers, so the texture travels with the part when re-oriented in Bambu.
+    if (result.regions.some((r) => r.partMeshes)) {
+      const out: ExportObject[] = [];
+      result.model.objects.forEach((obj, j) => {
+        obj.parts.forEach((mp, k) => {
+          const parts: Part[] = [{ name: mp.name, mesh: mp.mesh, extruder: 1, subtype: 'normal_part', color: baseColor }];
+          for (const r of result.regions) {
+            if (r.index < 1 || !r.partMeshes) continue;
+            const mesh = r.partMeshes[j]?.[k];
+            if (!mesh) continue;
+            const c = colorOf(r.index, r.hex);
+            parts.push({ name: c, mesh, extruder: r.index + 1, subtype: 'modifier_part', color: c });
+          }
+          out.push({ name: mp.name, parts });
+        });
+      });
+      return out;
+    }
+
+    // Default: one output object per input object, each with its object-cropped modifiers.
     return result.model.objects.map((obj, j) => {
       const parts: Part[] = obj.parts.map((mp) => ({
         name: mp.name,

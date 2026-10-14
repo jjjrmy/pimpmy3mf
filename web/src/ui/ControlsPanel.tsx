@@ -229,6 +229,19 @@ export function ControlsPanel(props: ControlsPanelProps) {
           {props.model && props.model.objects.reduce((n, o) => n + o.parts.length, 0) > 1 && (
             <PartsList model={props.model} hidden={props.hiddenParts} onToggle={props.onTogglePart} />
           )}
+          {props.model?.objects.some((o) => o.parts.length > 1) && (
+            <>
+              <label className="toggle">
+                <input type="checkbox" checked={params.perPart} onChange={(e) => onParams({ perPart: e.target.checked })} />
+                <span>Per-part modifiers</span>
+              </label>
+              <p className="hint">
+                {params.perPart
+                  ? 'Each part is exported as its own object with its own modifiers, so you can print it on its own plate in any orientation. The camo stays where it is in the assembled pose.'
+                  : 'Export one object per input object (parts stay together).'}
+              </p>
+            </>
+          )}
 
           <Field label="Projection axis">
             <select value={params.axis} onChange={(e) => onParams({ axis: e.target.value as Axis })}>

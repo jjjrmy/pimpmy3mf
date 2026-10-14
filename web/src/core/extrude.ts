@@ -16,6 +16,8 @@ export interface ExtrudeResult {
   area: number;
   /** Paint mode: the prism cropped to each cropBox (same order), null where nothing survived. */
   objectMeshes: (Mesh | null)[] | null;
+  /** Paint mode + perPart: the prism cropped to each part box, indexed [objectIndex][partIndex]. */
+  partMeshes: (Mesh | null)[][] | null;
 }
 
 type Ring = { x: Float64Array; y: Float64Array };
@@ -43,11 +45,25 @@ function meshFromManifold(man: ManifoldT, R?: number[] | null): Mesh {
   return { vertices, triangles: new Uint32Array(gm.triVerts) };
 }
 
+/** Intersect the prism with one uvw box and return the cropped mesh (mapped to xyz by R), or null. */
+function cropToBox(man: ManifoldT, b: CropBox, R: number[] | null | undefined, Manifold: ManifoldToplevel['Manifold']): Mesh | null {
+  const dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
+  if (dx <= 0 || dy <= 0 || dz <= 0) return null;
+  const cube = Manifold.cube([dx, dy, dz], false).translate([b.min[0], b.min[1], b.min[2]]);
+  const crop = man.intersect(cube);
+  let out: Mesh | null = null;
+  if (!crop.isEmpty() && crop.volume() > 1e-9) out = meshFromManifold(crop, R);
+  crop.delete(); cube.delete();
+  return out;
+}
+
 /**
  * @param R optional 3x3 row-major matrix mapping the extruded (u,v,w) vertices back to model xyz
  *          (paint mode: xyz = R·uvw). Omit in image mode.
  * @param cropBoxes paint mode: per-object uvw bounding boxes (± margin already applied). The prism is
  *          intersected with each; with one box the uncropped prism is reused (no boolean).
+ * @param partCropBoxes paint mode + perPart: per-part uvw boxes, indexed [objectIndex][partIndex]. A
+ *          single-part object reuses its object crop (no extra boolean).
  */
 export function extrudeRegion(
   wasm: ManifoldToplevel,
@@ -56,8 +72,10 @@ export function extrudeRegion(
   z0: number,
   R?: number[] | null,
   cropBoxes?: CropBox[] | null,
+  partCropBoxes?: CropBox[][] | null,
 ): ExtrudeResult {
   const { CrossSection, Manifold } = wasm;
+  const emptyParts = () => (partCropBoxes ? partCropBoxes.map((o) => o.map(() => null)) : null);
   const polys: [number, number][][] = [];
   for (const r of rings) {
     if (r.x.length < 3) continue;
@@ -66,14 +84,14 @@ export function extrudeRegion(
     polys.push(ring);
   }
   if (polys.length === 0) {
-    return { mesh: null, rings: [], area: 0, objectMeshes: cropBoxes ? cropBoxes.map(() => null) : null };
+    return { mesh: null, rings: [], area: 0, objectMeshes: cropBoxes ? cropBoxes.map(() => null) : null, partMeshes: emptyParts() };
   }
 
   const cs = new CrossSection(polys, 'EvenOdd').offset(-0.0005, 'Miter', 4);
   const area = cs.area();
   if (cs.isEmpty() || area <= 0) {
     cs.delete();
-    return { mesh: null, rings: [], area: 0, objectMeshes: cropBoxes ? cropBoxes.map(() => null) : null };
+    return { mesh: null, rings: [], area: 0, objectMeshes: cropBoxes ? cropBoxes.map(() => null) : null, partMeshes: emptyParts() };
   }
 
   const outPolys = cs.toPolygons();
@@ -91,19 +109,19 @@ export function extrudeRegion(
     if (cropBoxes.length === 1) {
       objectMeshes = [mesh]; // single object: the uncropped prism is the crop
     } else {
-      objectMeshes = cropBoxes.map((b) => {
-        const dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
-        if (dx <= 0 || dy <= 0 || dz <= 0) return null;
-        const cube = Manifold.cube([dx, dy, dz], false).translate([b.min[0], b.min[1], b.min[2]]);
-        const crop = man.intersect(cube);
-        let out: Mesh | null = null;
-        if (!crop.isEmpty() && crop.volume() > 1e-9) out = meshFromManifold(crop, R);
-        crop.delete(); cube.delete();
-        return out;
-      });
+      objectMeshes = cropBoxes.map((b) => cropToBox(man, b, R, Manifold));
     }
   }
 
+  let partMeshes: (Mesh | null)[][] | null = null;
+  if (partCropBoxes) {
+    partMeshes = partCropBoxes.map((boxesForObj, j) => {
+      // a single-part object: its part box equals its object box -> reuse the object crop
+      if (boxesForObj.length === 1 && objectMeshes) return [objectMeshes[j] ?? null];
+      return boxesForObj.map((pb) => cropToBox(man, pb, R, Manifold));
+    });
+  }
+
   cs.delete(); man.delete();
-  return { mesh, rings: outRings, area, objectMeshes };
+  return { mesh, rings: outRings, area, objectMeshes, partMeshes };
 }

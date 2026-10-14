@@ -2,7 +2,7 @@
 // math and wires color.ts / raster.ts / trace.ts / extrude.ts together with per-stage caching so a
 // thickness change only re-extrudes.
 import type {
-  Pipeline, RasterImage, Mesh, Model, ModelObject, Params, Result, ColorRegion, Axis, RGB, RunOptions,
+  Pipeline, RasterImage, Mesh, Model, ModelObject, ModelPart, Params, Result, ColorRegion, Axis, RGB, RunOptions,
 } from './types';
 import { initManifold } from './manifold';
 import { quantize, toHex, type QuantizeResult } from './color';
@@ -211,23 +211,26 @@ export function createPipeline(): Pipeline {
 
     // ---- stage 3: extrude ----
     const heightRange = g.w1 - g.w0;
-    const e3Key = `${gVer}|${geom.mode}|${geom.mode === 'image' ? params.thickness : heightRange}`;
+    const e3Key = `${gVer}|${geom.mode}|${geom.mode === 'image' ? params.thickness : heightRange}|${params.perPart ? 'P' : ''}`;
     if (eKey !== e3Key || !eRegions) {
       await tick('extrude');
       // per-object crop boxes (uvw): a Bambu modifier only acts on its own object
       const cropBoxes: CropBox[] | null = geom.mode === 'paint' && model
         ? model.objects.map((obj) => objectBoxUVW(obj, g.R)) : null;
+      // per-part crop boxes (uvw), [objectIndex][partIndex], only when perPart is on
+      const partCropBoxes: CropBox[][] | null = geom.mode === 'paint' && model && params.perPart
+        ? model.objects.map((obj) => obj.parts.map((p) => partBoxUVW(p, g.R))) : null;
       const regions: ColorRegion[] = [];
       const areas: number[] = [];
       for (let k = 0; k < ncol; k++) {
         const rings = gRings!.get(k) ?? [];
         const res = geom.mode === 'image'
           ? extrudeRegion(wasm, rings, params.thickness, 0)
-          : extrudeRegion(wasm, rings, heightRange, g.w0, g.R, cropBoxes);
+          : extrudeRegion(wasm, rings, heightRange, g.w0, g.R, cropBoxes, partCropBoxes);
         areas.push(res.area);
         regions.push({
           index: k, rgb: colors[k], hex: toHex(colors[k]),
-          coverage: 0, rings: res.rings, mesh: res.mesh, objectMeshes: res.objectMeshes,
+          coverage: 0, rings: res.rings, mesh: res.mesh, objectMeshes: res.objectMeshes, partMeshes: res.partMeshes,
         });
       }
       const total = areas.reduce((s, a) => s + a, 0) || 1;
@@ -244,6 +247,7 @@ export function createPipeline(): Pipeline {
       rings: r.rings.map((ring) => ring.slice()),
       mesh: cloneMesh(r.mesh),
       objectMeshes: r.objectMeshes ? r.objectMeshes.map(cloneMesh) : null,
+      partMeshes: r.partMeshes ? r.partMeshes.map((o) => o.map(cloneMesh)) : null,
     }));
 
     return {
@@ -267,11 +271,10 @@ export function createPipeline(): Pipeline {
   return { run, dispose };
 }
 
-/** One model object's bounding box in uvw (projected by R), expanded by a 1 mm margin each side. */
-function objectBoxUVW(obj: ModelObject, R: number[]): CropBox {
+// Accumulate a uvw bounding box over several vertex arrays (projected by R).
+function boxUVW(meshes: Float32Array[], R: number[]): CropBox {
   let lou = Infinity, lov = Infinity, low = Infinity, hiu = -Infinity, hiv = -Infinity, hiw = -Infinity;
-  for (const part of obj.parts) {
-    const v = part.mesh.vertices;
+  for (const v of meshes) {
     for (let i = 0; i < v.length; i += 3) {
       const x = v[i], y = v[i + 1], z = v[i + 2];
       const u = x * R[0] + y * R[3] + z * R[6];
@@ -284,6 +287,16 @@ function objectBoxUVW(obj: ModelObject, R: number[]): CropBox {
   }
   const m = 1.0;
   return { min: [lou - m, lov - m, low - m], max: [hiu + m, hiv + m, hiw + m] };
+}
+
+/** One model object's bounding box in uvw (all its parts), expanded by a 1 mm margin each side. */
+function objectBoxUVW(obj: ModelObject, R: number[]): CropBox {
+  return boxUVW(obj.parts.map((p) => p.mesh.vertices), R);
+}
+
+/** One part's bounding box in uvw, expanded by a 1 mm margin each side. */
+function partBoxUVW(part: ModelPart, R: number[]): CropBox {
+  return boxUVW([part.mesh.vertices], R);
 }
 
 /** Recompute grid metrics once the real (possibly downscaled) source size is known. */

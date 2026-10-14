@@ -20,6 +20,11 @@ modifier volumes projected through the model: top-down by default, or --axis x|y
 The 3MF holds the model on filament 1 (the most common color) plus one modifier per other color.
 A multi-part / multi-object 3MF keeps its parts and objects separate.
 
+--per-part (paint mode) makes every input PART its own top-level object, carrying only its own
+modifiers cropped to that part's bounding box. The texture stays exactly where it is in the
+assembled pose - same frame, projection, rotation, offset and tile; only the crop box changes - so
+you can print each part separately in any orientation and the camo still lines up once reassembled.
+
 --rotate DEG turns the pattern counterclockwise (as seen in the preview) about the center of the
 covered area, then --offset X,Y shifts it in mm (+X right, +Y up). A turned or shifted pattern
 repeats past the image edges, so nothing is left uncovered; without --size, --apply-to also scales
@@ -31,6 +36,7 @@ Examples:
   img2color camo.png --palette="#1E1E1E,#8B3A3A,#9A9A9A"     # snap to the filaments you own
   img2color camo.png --colors=3 --apply-to part.stl --size=60  # paint part.stl, texture tiled every 60 mm
   img2color camo.png --colors=3 --rotate=30 --offset=10,-5     # turn the pattern 30°, shift it 10 mm right, 5 mm down
+  img2color camo.png --colors=3 --apply-to assembly.3mf --per-part  # one object per part, texture stays aligned
 """
 import argparse
 import glob
@@ -884,6 +890,9 @@ def main():
     ap.add_argument("-a", "--apply-to", metavar="MODEL", help="paint this model (.stl/.3mf/.obj) with the colors")
     ap.add_argument("--axis", choices=["z", "y", "x"], default="z",
                     help="--apply-to projection direction: z = top-down (default), y = front, x = side")
+    ap.add_argument("--per-part", action="store_true",
+                    help="--apply-to only: make each input part its own object with its own modifiers "
+                    "cropped to that part (the shared texture stays put), so parts print separately")
     ap.add_argument("-o", "--out", help="output folder (default: next to the image)")
     ap.add_argument("--no-bambu", action="store_true", help="write a plain 3MF; don't build a Bambu Studio project")
     ap.add_argument("--printer", default=DEFAULT_PRINTER, help=f'Bambu printer preset (default "{DEFAULT_PRINTER}")')
@@ -902,6 +911,8 @@ def main():
         raise SystemExit("--colors must be between 1 and 32")
     if args.thickness <= 0:
         raise SystemExit("--thickness must be > 0")
+    if args.per_part and not args.apply_to:
+        log("note: --per-part only applies with --apply-to; ignoring")
 
     m = re.fullmatch(r"\s*([-+0-9.]+)\s*[,xX ]\s*([-+0-9.]+)\s*(mm)?\s*", args.offset)
     if not m:
@@ -1036,30 +1047,52 @@ def main():
             full[k] = (mesh[0] @ R.T, mesh[1])                 # uvw -> xyz
             write_stl(out_dir / fname, *full[k])
             rows.append((k, fname))
-        # Each input object stays its own object with its own parts (all on filament 1). A Bambu
-        # modifier only colors the object it belongs to, so every object gets its own copy of the
-        # color prisms, cropped to its bounding box. Color 1 is the model itself.
-        for o in mobjs:
-            parts = [dict(name=p["name"], v=p["v"], t=p["t"], extruder=1, subtype="normal_part",
-                          color=hexes[0], k=None) for p in o["parts"]]
-            if len(mobjs) == 1:
-                mods = {k: m for k, m in full.items() if k > 0}
-            else:
-                ouvw = np.concatenate([p["v"] for p in o["parts"]]) @ R
-                olo, ohi = ouvw.min(0) - margin, ouvw.max(0) + margin
-                rect = shapely.box(olo[0], olo[1], ohi[0], ohi[1])
-                mods = {}
-                for k in range(1, ncol):
-                    ps = polys_mm.get(k, [])
-                    clipped = [g for g in shapely.get_parts(shapely.intersection(np.array(ps, dtype=object), rect))
-                               if g.geom_type == "Polygon" and not g.is_empty] if ps else []
-                    mesh = extrude(clipped, ohi[2] - olo[2], olo[2])
-                    if mesh is not None:
-                        mods[k] = (mesh[0] @ R.T, mesh[1])
-            for k, (v, t) in sorted(mods.items()):
-                parts.append(dict(name=hexes[k], v=v, t=t, extruder=k + 1, subtype="modifier_part",
-                                  color=hexes[k], k=k))
-            objects.append(dict(name=o["name"], parts=parts))
+
+        def crop_mods(verts_xyz):
+            """Each color's modifier prism (k >= 1) cropped to the uvw bbox of verts_xyz (± margin).
+            The texture never moves - only the crop box changes - so cropped pieces stay registered
+            to the shared global pattern. Returns {k: (v_xyz, t)}."""
+            uvw = verts_xyz @ R
+            clo, chi = uvw.min(0) - margin, uvw.max(0) + margin
+            rect = shapely.box(clo[0], clo[1], chi[0], chi[1])
+            mods = {}
+            for k in range(1, ncol):
+                ps = polys_mm.get(k, [])
+                clipped = [g for g in shapely.get_parts(shapely.intersection(np.array(ps, dtype=object), rect))
+                           if g.geom_type == "Polygon" and not g.is_empty] if ps else []
+                mesh = extrude(clipped, chi[2] - clo[2], clo[2])
+                if mesh is not None:
+                    mods[k] = (mesh[0] @ R.T, mesh[1])
+            return mods
+
+        # Each input object (or, with --per-part, each input part) stays its own object with its
+        # parts on filament 1. A Bambu modifier only colors the object it belongs to, so every
+        # object gets its own copy of the color prisms, cropped to its bounding box. Color 1 is the
+        # model itself. --per-part writes per-part modifier STLs too (<stem>-part<k>-...).
+        if args.per_part:
+            pk = 0
+            for o in mobjs:
+                for p in o["parts"]:
+                    pk += 1
+                    parts = [dict(name=p["name"], v=p["v"], t=p["t"], extruder=1,
+                                  subtype="normal_part", color=hexes[0], k=None)]
+                    for k, (v, t) in sorted(crop_mods(p["v"]).items()):
+                        write_stl(out_dir / f"{stem}-part{pk}-{k + 1}-{hexes[k][1:]}-modifier.stl", v, t)
+                        parts.append(dict(name=hexes[k], v=v, t=t, extruder=k + 1,
+                                          subtype="modifier_part", color=hexes[k], k=k))
+                    objects.append(dict(name=p["name"], parts=parts))
+        else:
+            for o in mobjs:
+                parts = [dict(name=p["name"], v=p["v"], t=p["t"], extruder=1, subtype="normal_part",
+                              color=hexes[0], k=None) for p in o["parts"]]
+                if len(mobjs) == 1:
+                    mods = {k: m for k, m in full.items() if k > 0}
+                else:
+                    mods = crop_mods(np.concatenate([p["v"] for p in o["parts"]]))
+                for k, (v, t) in sorted(mods.items()):
+                    parts.append(dict(name=hexes[k], v=v, t=t, extruder=k + 1, subtype="modifier_part",
+                                      color=hexes[k], k=k))
+                objects.append(dict(name=o["name"], parts=parts))
         out_3mf = out_dir / f"{safe(mpath.stem)}-{stem}-{ncol}colors.3mf"
 
     # ---- 3MF: a Bambu Studio project with the colors preloaded, else a plain 3MF
@@ -1079,12 +1112,13 @@ def main():
                np.concatenate([p["t"] + b for p, b in zip(mparts, base)]))
         structure = (f"{len(model[1])} object{'s' * (len(model[1]) > 1)}, "
                      f"{len(mparts)} part{'s' * (len(mparts) > 1)}")
+        split = "each part its own object (--per-part)" if args.per_part else "kept separate"
     save_preview(prev, im, polys_mm, colors, (bx0, by0, bx1, by1), sil)
 
     with open(out_dir / "colors.txt", "w") as f:
         f.write(f"# img2color {src.name}  {ncol} colors\n")
         if model is not None:
-            f.write(f"# painted onto {model[0].name} ({structure}, kept separate); filament 1 = the model, "
+            f.write(f"# painted onto {model[0].name} ({structure}, {split}); filament 1 = the model, "
                     f"others = modifiers (projection axis {args.axis})\n")
         f.write("filament  hex      coverage  file\n")
         for k, fname in rows:
@@ -1098,7 +1132,7 @@ def main():
         + (f", offset {dx:g},{dy:g} mm" if dx or dy else "")
         + f", grid {nx}x{ny} @ {qx:.3f} mm")
     if model is not None:
-        log(f"  model: {structure}, kept separate")
+        log(f"  model: {structure}, {split}")
     for k, fname in rows:
         tri = sum(len(p["t"]) for o in objects for p in o["parts"] if p["k"] == k)
         note = "  = the model itself (no modifier)" if model is not None and k == 0 else \

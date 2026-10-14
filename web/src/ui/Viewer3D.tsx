@@ -272,7 +272,8 @@ export function Viewer3D({ result, hexes, hidden, hiddenParts, showModifiers, be
       // modifiers as exported: one copy per object, cropped to that object (falls back to the full prism)
       for (const r of result.regions) {
         if (r.index === 0) continue;
-        const copies = (r.objectMeshes ?? [r.mesh]).filter((m): m is CoreMesh => !!m);
+        // per-part export: one copy per part; else per object; else the full prism. The texture is identical either way.
+        const copies = (r.partMeshes?.flat() ?? r.objectMeshes ?? [r.mesh]).filter((m): m is CoreMesh => !!m);
         const meshes = copies.map((m) => {
           const prism = new THREE.Mesh(
             toGeometry(m),

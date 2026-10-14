@@ -45,6 +45,7 @@ img2color camo.png --colors=3                         # one shape per color, 100
 img2color camo.png --colors=4 --size=150 --thickness=1.2
 img2color camo.png --palette="#1E1E1E,#8B3A3A,#9A9A9A"   # snap to the filaments you own
 img2color camo.png --colors=3 --apply-to part.3mf --size=60 --rotate=30 --offset=5,0
+img2color camo.png --colors=3 --apply-to assembly.3mf --per-part  # one object per part, texture stays aligned
 ```
 
 Output goes next to the image in `<name>-<N>colors/`:

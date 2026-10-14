@@ -2,7 +2,7 @@
 // Usage:
 //   bun scripts/headless.ts in.rgba [--model file] [--colors N] [--palette '#..,#..']
 //        [--width W] [--height H] [--thickness T] [--smooth S] [--min-feature M]
-//        [--resolution R] [--axis z|y|x] [--rotation DEG] [--offset-x MM] [--offset-y MM] --out DIR
+//        [--resolution R] [--axis z|y|x] [--rotation DEG] [--offset-x MM] [--offset-y MM] [--per-part] --out DIR
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +26,11 @@ function parseArgs(argv: string[]) {
   let input = '';
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
-    if (t.startsWith('--')) { a[t.slice(2)] = argv[i + 1]; i++; }
-    else if (!input) input = t;
+    if (t.startsWith('--')) {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) { a[t.slice(2)] = ''; } // boolean flag
+      else { a[t.slice(2)] = next; i++; }
+    } else if (!input) input = t;
   }
   return { input, a };
 }
@@ -50,6 +53,7 @@ function buildParams(a: Record<string, string>): Params {
     rotation: num('rotation', DEFAULT_PARAMS.rotation),
     offsetX: num('offset-x', DEFAULT_PARAMS.offsetX),
     offsetY: num('offset-y', DEFAULT_PARAMS.offsetY),
+    perPart: 'per-part' in a ? true : DEFAULT_PARAMS.perPart,
   };
 }
 
@@ -101,6 +105,23 @@ async function main() {
         writeFileSync(join(outDir, `obj${j + 1}-${reg.index + 1}-${reg.hex.slice(1)}-modifier.stl`), writeStl(m));
       });
     }
+    // per-part cropped modifier STLs: obj<j>-part<k>-<i>-<HEX>-modifier.stl
+    if (params.perPart && result.regions.some((r) => r.partMeshes)) {
+      console.log('per-part modifiers:');
+      result.model.objects.forEach((obj, j) => {
+        obj.parts.forEach((p, k) => {
+          const cnt = result.regions.filter((r) => r.partMeshes?.[j]?.[k]).length;
+          console.log(`  obj ${j + 1} part ${k + 1} "${p.name}": ${cnt} color modifier(s)`);
+        });
+      });
+      for (const reg of result.regions) {
+        if (!reg.partMeshes) continue;
+        reg.partMeshes.forEach((parts, j) => parts.forEach((m, k) => {
+          if (!m) return;
+          writeFileSync(join(outDir, `obj${j + 1}-part${k + 1}-${reg.index + 1}-${reg.hex.slice(1)}-modifier.stl`), writeStl(m));
+        }));
+      }
+    }
   }
 
   // thickness-only re-run to demonstrate the cache (image mode: changes extrude only)
@@ -127,6 +148,7 @@ async function main() {
       coverage: +(r.coverage * 100).toFixed(1),
       triangles: triCount(r.mesh),
       objectTriangles: r.objectMeshes ? r.objectMeshes.map(triCount) : null,
+      partTriangles: r.partMeshes ? r.partMeshes.map((o) => o.map(triCount)) : null,
       rings: r.rings.length,
       file: files[i],
     })),

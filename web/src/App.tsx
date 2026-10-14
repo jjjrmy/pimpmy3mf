@@ -187,6 +187,7 @@ export default function App() {
       const info = await client.setModel(bytes, file.name);
       setModel({ name: file.name, triangles: info.triangles, objects: info.objects });
       setHiddenParts(new Set());
+      patchParams({ perPart: false }); // opt-in per model
       setModelToken((t) => t + 1);
       setError(null);
     } catch (err) {

@@ -71,6 +71,12 @@ export interface Params {
   /** Pattern offset in mm along the 2D map's x / y (y up), applied after rotation. The pattern wraps. */
   offsetX: number;
   offsetY: number;
+  /**
+   * Paint mode: also build per-PART modifier copies (ColorRegion.partMeshes), so the export can make every input
+   * part its own object with its own modifiers. The texture stays exactly where it is in the assembled pose (same
+   * frame, projection, rotation, offset and tiling; only the crop box changes).
+   */
+  perPart: boolean;
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -86,6 +92,7 @@ export const DEFAULT_PARAMS: Params = {
   rotation: 0,
   offsetX: 0,
   offsetY: 0,
+  perPart: false,
 };
 
 /** 2D map frame in mm (y up). Image mode: 0,0 .. w,h. Paint mode: model's projected bbox + 1 mm margin (u,v plane). */
@@ -121,6 +128,12 @@ export interface ColorRegion {
    * object, so each output object gets its own copy. null in image mode.
    */
   objectMeshes: (Mesh | null)[] | null;
+  /**
+   * Paint mode with params.perPart: this color's prism cropped to each PART's bounding box + 1 mm margin, indexed
+   * [objectIndex][partIndex] like result.model. null otherwise. When present, objectsFromResult emits one output
+   * object per part (named after the part) carrying these modifiers.
+   */
+  partMeshes: (Mesh | null)[][] | null;
 }
 
 export interface Result {

@@ -13,7 +13,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import { objectsFromResult, writeBambuProject, writePlain3mf, PRINTERS } from '../src/core/threemf';
 import { loadTemplate, TEMPLATE_IDS } from '../src/core/bambu/template';
 import type { ColorRegion, ExportObject, Mesh, Model, Part, Result } from '../src/core/types';
@@ -293,6 +293,85 @@ async function sliceCase(name: string, objects: ExportObject[], colors: string[]
   return r;
 }
 
+// ------------------------------------------------------------------ per-part helpers
+
+/** Synthetic paint Result: one input object with 3 parts (slabs) + per-part modifiers for each color.
+ * sideBySide keeps parts apart in XY (one plate); stacked overlaps them in XY (forces packing). */
+function perPartResult(sideBySide: boolean): Result {
+  const bx = (i: number): number => (sideBySide ? i * 40 : 0);
+  const bz = (i: number): number => (sideBySide ? 0 : i * 6);
+  const partBox = (i: number): Mesh => box(bx(i), 0, 30, 30, 4, bz(i));
+  // region 1 recolors a LEFT strip, region 2 a RIGHT strip of each part (distinct, so both extrude).
+  const modBox = (i: number, region: number): Mesh => box(bx(i) + (region === 1 ? 3 : 17), 3, 10, 24, 6, bz(i) - 1);
+  const model: Model = { objects: [{ name: 'asm', parts: [0, 1, 2].map((i) => ({ name: `p${i}`, mesh: partBox(i) })) }] };
+  const mkRegion = (index: number, hex: string, pm: (Mesh | null)[]): ColorRegion => ({
+    index, rgb: [0, 0, 0], hex, coverage: 1, rings: [], mesh: partBox(0), objectMeshes: [partBox(0)], partMeshes: [pm],
+  });
+  return {
+    mode: 'paint', model,
+    frame: { x0: 0, y0: 0, x1: 1, y1: 1 }, tile: { w: 1, h: 1, repeat: false }, axis: 'z',
+    stats: { imageW: 1, imageH: 1, gridW: 1, gridH: 1, pitch: 1, ms: 0 }, warnings: [],
+    regions: [
+      mkRegion(0, '#866B6B', [null, null, null]),
+      mkRegion(1, '#1F7A1F', [modBox(0, 1), modBox(1, 1), modBox(2, 1)]),
+      mkRegion(2, '#2040C0', [modBox(0, 2), modBox(1, 2), modBox(2, 2)]),
+    ],
+  };
+}
+
+interface XYZBounds { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number; }
+function boundsOfObject(o: ExportObject): XYZBounds {
+  const b: XYZBounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+  for (const p of o.parts) {
+    if (p.subtype !== 'normal_part') continue;
+    const v = p.mesh.vertices;
+    for (let i = 0; i < v.length; i += 3) {
+      b.minX = Math.min(b.minX, v[i]); b.maxX = Math.max(b.maxX, v[i]);
+      b.minY = Math.min(b.minY, v[i + 1]); b.maxY = Math.max(b.maxY, v[i + 1]);
+      b.minZ = Math.min(b.minZ, v[i + 2]); b.maxZ = Math.max(b.maxZ, v[i + 2]);
+    }
+  }
+  return b;
+}
+
+const RZ90 = [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]; // 90 deg about Z (row-vector p*R)
+const RX90 = [[1, 0, 0], [0, 0, 1], [0, -1, 0]]; // 90 deg about X
+
+const mulRow = (v: number[], R: number[][]): number[] => [
+  v[0] * R[0][0] + v[1] * R[1][0] + v[2] * R[2][0],
+  v[0] * R[0][1] + v[1] * R[1][1] + v[2] * R[2][1],
+  v[0] * R[0][2] + v[1] * R[1][2] + v[2] * R[2][2],
+];
+
+/** Build-item transform that rotates a placed object about its own centre (keeping it on the plate),
+ * optionally dropping it so min z = 0. g = geometry world bbox, t0 = original build translation. */
+function rotatedTransform(g: XYZBounds, t0: number[], R: number[][], drop: boolean): string {
+  const gc = [(g.minX + g.maxX) / 2, (g.minY + g.maxY) / 2, (g.minZ + g.maxZ) / 2];
+  const gcR = mulRow(gc, R);
+  const trans = [gc[0] - gcR[0] + t0[0], gc[1] - gcR[1] + t0[1], gc[2] - gcR[2] + t0[2]];
+  if (drop) {
+    let minZ = Infinity;
+    for (const x of [g.minX, g.maxX]) for (const y of [g.minY, g.maxY]) for (const z of [g.minZ, g.maxZ]) {
+      minZ = Math.min(minZ, mulRow([x, y, z], R)[2] + trans[2]);
+    }
+    trans[2] -= minZ;
+  }
+  const n = (x: number): string => Number(x.toFixed(5)).toString();
+  return `${R[0][0]} ${R[0][1]} ${R[0][2]} ${R[1][0]} ${R[1][1]} ${R[1][2]} ${R[2][0]} ${R[2][1]} ${R[2][2]} ${n(trans[0])} ${n(trans[1])} ${n(trans[2])}`;
+}
+
+/** Replace the transform of the objectIndex-th build <item> in a project's 3dmodel.model. */
+function replaceBuildTransform(bytes: Uint8Array, objectIndex: number, transform: string): Uint8Array {
+  const files = unzipSync(bytes);
+  let n = 0;
+  const xml = new TextDecoder().decode(files['3D/3dmodel.model']).replace(
+    /(<item objectid="\d+"[^>]*transform=")([^"]*)(")/g,
+    (m, pre, _t, post) => (n++ === objectIndex ? pre + transform + post : m),
+  );
+  files['3D/3dmodel.model'] = new TextEncoder().encode(xml);
+  return zipSync(files, { level: 6 });
+}
+
 // ------------------------------------------------------------------------------------------- run
 
 async function main() {
@@ -300,8 +379,9 @@ async function main() {
   if (want('objectsFromResult')) {
     console.log('\n# objectsFromResult');
     const mk = (): Mesh => box(0, 0, 10, 10, 1);
-    const region = (index: number, hex: string, objectMeshes: (Mesh | null)[] | null = null): ColorRegion => ({
-      index, rgb: [0, 0, 0], hex, coverage: 1, rings: [], mesh: mk(), objectMeshes,
+    const region = (index: number, hex: string, objectMeshes: (Mesh | null)[] | null = null,
+      partMeshes: (Mesh | null)[][] | null = null): ColorRegion => ({
+      index, rgb: [0, 0, 0], hex, coverage: 1, rings: [], mesh: mk(), objectMeshes, partMeshes,
     });
     const base = { frame: { x0: 0, y0: 0, x1: 10, y1: 10 }, tile: { w: 10, h: 10, repeat: false }, axis: 'z' as const,
       stats: { imageW: 1, imageH: 1, gridW: 1, gridH: 1, pitch: 1, ms: 0 }, warnings: [] };
@@ -331,6 +411,20 @@ async function main() {
     check('paint2: two objects named left,right', po2.length === 2 && po2[0].name === 'left' && po2[1].name === 'right');
     check('paint2: left has its modifier (ext2) only', po2[0].parts.length === 2 && po2[0].parts[1].extruder === 2);
     check('paint2: right has its modifier (ext3) only', po2[1].parts.length === 2 && po2[1].parts[1].extruder === 3);
+
+    // per-part: one input object with 3 parts; partMeshes [obj][part]. Region 1 touches part 0 & 2, region 2 part 1.
+    const model3: Model = { objects: [{ name: 'asm', parts: [{ name: 'p0', mesh: mk() }, { name: 'p1', mesh: mk() }, { name: 'p2', mesh: mk() }] }] };
+    const ppRes: Result = { ...base, mode: 'paint', model: model3,
+      regions: [
+        region(0, '#AAAAAA', [mk()], [[mk(), mk(), mk()]]),
+        region(1, '#BBBBBB', [mk()], [[mk(), null, mk()]]),
+        region(2, '#CCCCCC', [mk()], [[null, mk(), null]]),
+      ] };
+    const ppo = objectsFromResult(ppRes, ['#AAAAAA', '#BBBBBB', '#CCCCCC'], 'm');
+    check('perpart: one object per part (3), named after parts', ppo.length === 3 && ppo.map((o) => o.name).join(',') === 'p0,p1,p2');
+    check('perpart: p0 = normal(ext1) + ext2 modifier', ppo[0].parts.length === 2 && ppo[0].parts[0].subtype === 'normal_part' && ppo[0].parts[0].extruder === 1 && ppo[0].parts[1].subtype === 'modifier_part' && ppo[0].parts[1].extruder === 2);
+    check('perpart: p1 = normal + ext3 modifier', ppo[1].parts.length === 2 && ppo[1].parts[1].extruder === 3);
+    check('perpart: p2 = normal + ext2 modifier', ppo[2].parts.length === 2 && ppo[2].parts[1].extruder === 2);
   }
 
   // ---- plain 3mf sanity (multi-object structure)
@@ -460,6 +554,54 @@ async function main() {
 
   // ---- multi-plate layout (keep vs re-arrange onto Bambu's plate grid)
   if (want('multiplate')) await multiplateCases();
+
+  // ---- per-part modifiers: one output object per input part, carrying its own modifiers
+  if (want('perpart-slice')) {
+    const colors = ['#866B6B', '#1F7A1F', '#2040C0'];
+    for (const [tag, sbs] of [['sidebyside', true], ['stacked', false]] as [string, boolean][]) {
+      console.log(`\n# perpart-slice ${tag}`);
+      const objects = objectsFromResult(perPartResult(sbs), colors, 'asm');
+      const { bytes, warnings } = await writeBambuProject(objects, { printerId: 'p2s-0.4', filamentColors: colors });
+      writeFileSync(`${OUT}/perpart-${tag}.3mf`, bytes);
+      const ms = readModelSettings(bytes);
+      check(`perpart ${tag}: 3 objects, each 1 normal + 2 modifiers`,
+        ms.length === 3 && ms.every((o) => o.parts.filter((p) => p.subtype === 'normal_part').length === 1 && o.parts.filter((p) => p.subtype === 'modifier_part').length === 2),
+        `(${JSON.stringify(ms.map((o) => o.parts.length))})`);
+      check(`perpart ${tag}: objects named p0,p1,p2`, ms.map((o) => o.name).join(',') === 'p0,p1,p2');
+      check(`perpart ${tag}: modifier extruders 2,3`, ms.every((o) => o.parts.filter((p) => p.subtype === 'modifier_part').map((p) => p.extruder).sort().join(',') === '2,3'));
+      const info = readPlateInfo(bytes);
+      const rearranged = warnings.some((w) => w.includes('re-arranged'));
+      const xf = readBuildTransforms(bytes);
+      check(`perpart ${tag}: ${sbs ? 'kept (shared translation, 1 plate)' : 're-arranged (separated)'}`,
+        sbs ? !rearranged && info.nPlates === 1 && new Set(xf).size === 1 : rearranged,
+        `(nPlates ${info.nPlates}, distinctXf ${new Set(xf).size}, warnings ${warnings.join('|') || 'none'})`);
+      const r = sliceAllPlates(`${OUT}/perpart-${tag}.3mf`, `perpart-${tag}`);
+      check(`perpart ${tag}: slices rc0`, r.returnCode === 0, `(got ${r.returnCode}: ${r.error})`);
+      const union = new Set<number>();
+      for (const p of r.plates) { for (const t of p.extrudePerTool.keys()) union.add(t); }
+      check(`perpart ${tag}: all 3 filaments extrude`, [0, 1, 2].every((t) => union.has(t)), `(used ${JSON.stringify([...union].sort())})`);
+    }
+  }
+
+  // ---- per-part + rotate the object's build-item transform (Z, and X-with-drop), then slice.
+  // Use a SINGLE part-object so the modifier filaments can only come from this object's modifiers.
+  if (want('perpart-rotate')) {
+    const colors = ['#866B6B', '#1F7A1F', '#2040C0'];
+    const one = objectsFromResult(perPartResult(true), colors, 'asm').slice(0, 1); // just p0 + its 2 modifiers
+    const { bytes } = await writeBambuProject(one, { printerId: 'p2s-0.4', filamentColors: colors });
+    const t0 = readBuildTransforms(bytes)[0].split(' ').slice(9).map(Number);
+    const b0 = boundsOfObject(one[0]);
+    for (const [tag, R, drop] of [['rotz90', RZ90, false], ['rotx90-drop', RX90, true]] as [string, number[][], boolean][]) {
+      console.log(`\n# perpart-rotate ${tag} (single object p0)`);
+      const rotated = replaceBuildTransform(bytes, 0, rotatedTransform(b0, t0, R, drop));
+      writeFileSync(`${OUT}/perpart-${tag}.3mf`, rotated);
+      const r = sliceAllPlates(`${OUT}/perpart-${tag}.3mf`, `perpart-${tag}`);
+      check(`perpart ${tag}: slices rc0`, r.returnCode === 0, `(got ${r.returnCode}: ${r.error})`);
+      const union = new Set<number>();
+      for (const p of r.plates) { for (const t of p.extrudePerTool.keys()) union.add(t); }
+      check(`perpart ${tag}: modifier filaments (2,3) still appear on rotated object`, union.has(1) && union.has(2), `(used ${JSON.stringify([...union].sort())})`);
+    }
+  }
 
   // ---- large mesh writer perf (build only)
   if (want('perf')) {
