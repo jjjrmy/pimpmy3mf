@@ -11,8 +11,8 @@ import { DesignTab } from './ui/DesignTab';
 import { ColorsTab } from './ui/ColorsTab';
 import { ActionBar } from './ui/ActionBar';
 import { DropOverlay } from './ui/DropOverlay';
+import { ViewportLoading } from './ui/ViewportLoading';
 import { Viewer3D } from './ui/Viewer3D';
-import { Map2D } from './ui/Map2D';
 import { Legend, StatusLine } from './ui/Legend';
 import { hexToRgb } from './ui/colorMap';
 import { useFilaments } from './ui/useFilaments';
@@ -29,6 +29,24 @@ const PLATE = 'Textured PEI Plate';
 
 const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp)$/i;
 const MODEL_RE = /\.(stl|3mf|obj)$/i;
+
+/** Map the pipeline's internal stage names to friendly text for the viewport loading overlay. */
+function friendlyStage(stage: string | null): string {
+  switch (stage) {
+    case 'quantize':
+      return 'Simplifying colors…';
+    case 'grid':
+      return 'Mapping the grid…';
+    case 'despeckle':
+      return 'Cleaning speckles…';
+    case 'trace':
+      return 'Tracing outlines…';
+    case 'extrude':
+      return 'Building 3D…';
+    default:
+      return 'Working…';
+  }
+}
 
 interface ImageState {
   blob: Blob;
@@ -90,12 +108,15 @@ export default function App() {
   const [overrides, setOverrides] = useState<(string | null)[]>([]);
   const [hidden, setHidden] = useState<Set<number>>(new Set());
 
-  const [view, setView] = useState<'3d' | '2d'>('3d');
   const [showModifiers, setShowModifiers] = useState(false);
   const [lockAspect, setLockAspect] = useState(true);
 
   // whole-page drag-and-drop overlay (depth counter keeps it from flickering on child elements)
   const [dragging, setDragging] = useState(false);
+
+  // viewport loading overlay: label for a non-pipeline load (image decode / model / preset), or null
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [showLoading, setShowLoading] = useState(false);
 
   // printer + nozzle combo for the Bambu project, remembered across visits (default: first = P2S 0.4)
   const [printerId, setPrinterIdState] = useState<string>(() => {
@@ -169,6 +190,7 @@ export default function App() {
   // ---- loading handlers ----------------------------------------------------------------------
   const onImageFile = async (file: File) => {
     const client = clientRef.current!;
+    setBusyLabel('Decoding image…');
     try {
       const info = await client.setImage(file, file.name);
       setImage((prev) => {
@@ -178,6 +200,8 @@ export default function App() {
       setError(null);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setBusyLabel(null);
     }
   };
 
@@ -194,6 +218,7 @@ export default function App() {
   const onPreset = async (item: PresetItem) => {
     setPresetBusy(item.id);
     setSelectedPresetId(item.id);
+    setBusyLabel('Loading camo…');
     try {
       const res = await fetch(`/presets/${item.file}`);
       if (!res.ok) throw new Error(`Couldn't load the "${item.name}" preset (${res.status}).`);
@@ -203,11 +228,13 @@ export default function App() {
       setError((err as Error).message);
     } finally {
       setPresetBusy(null);
+      setBusyLabel(null);
     }
   };
 
   const onModel = async (file: File) => {
     const client = clientRef.current!;
+    setBusyLabel('Loading model…');
     try {
       const bytes = await file.arrayBuffer();
       const info = await client.setModel(bytes, file.name);
@@ -219,6 +246,8 @@ export default function App() {
       onModeChange('paint');
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setBusyLabel(null);
     }
   };
 
@@ -407,6 +436,23 @@ export default function App() {
   const hasResult = !!result && result.regions.length > 0;
   const perPartAvailable = !!model?.objects.some((o) => o.parts.length > 1);
 
+  // The header title shows what's loaded: the model's file name, else the picked camo's name, else the image's.
+  const presetName = selectedPresetId ? (presets?.items.find((p) => p.id === selectedPresetId)?.name ?? null) : null;
+  const headerName = model?.name ?? presetName ?? image?.name ?? null;
+
+  // Viewport loading overlay: busy = a non-pipeline load or a pipeline run. Reveal only after ~150 ms
+  // of continuous work so quick re-runs (thickness / color tweaks) don't flash it.
+  const busy = !!busyLabel || running;
+  useEffect(() => {
+    if (!busy) {
+      setShowLoading(false);
+      return;
+    }
+    const t = window.setTimeout(() => setShowLoading(true), 150);
+    return () => window.clearTimeout(t);
+  }, [busy]);
+  const loadingLabel = busyLabel ?? (running ? friendlyStage(stage) : 'Working…');
+
   const emptyTitle = !image && !model ? 'Drop an image or a model' : model && !image ? 'Add an image to paint' : 'Generating…';
   const emptyBody =
     !image && !model
@@ -442,26 +488,15 @@ export default function App() {
     <div className="app">
       <DropOverlay visible={dragging} />
 
-      <header className="header">
-        <a className="header-brand" href="/" aria-label="pimpmy3mf home">
-          <img className="header-logo" src="/logo.svg" alt="Pimp My 3MF" width={198} height={128} />
-          <span className="header-title">The 3MF Pimper</span>
-        </a>
-        <div className="header-right">
-          <span className="privacy">Everything runs in your browser — nothing is uploaded.</span>
-          <a className="gh-link" href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="Source on GitHub" title="Source on GitHub">
-            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor">
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-            </svg>
-            <span>GitHub</span>
-          </a>
-        </div>
-      </header>
-
       <main className="stage">
         <div className="panel">
           <div className="panel-left">
-            <h2 className="panel-heading">Design Your Print:</h2>
+            <div className="panel-left-head">
+              <h2 className="panel-heading">Design Your Print:</h2>
+              <span className="logo-bump">
+                <img className="panel-logo" src="/logo.svg" alt="Pimp My 3MF" width={198} height={128} />
+              </span>
+            </div>
             <TabStrip active={tab} onChange={setTab} />
             <div className="panel-left-body">
               <div role="tabpanel" id="panel-texture" aria-labelledby="tab-texture" hidden={tab !== 'texture'}>
@@ -514,25 +549,32 @@ export default function App() {
           </div>
 
           <div className="panel-right">
-            <div className="viewport-toolbar">
-              <div className="segmented segmented-sm view-switch" role="group" aria-label="View">
-                <button type="button" className={view === '3d' ? 'is-active' : ''} onClick={() => setView('3d')}>
-                  3D
-                </button>
-                <button type="button" className={view === '2d' ? 'is-active' : ''} onClick={() => setView('2d')}>
-                  2D
-                </button>
+            <div className="panel-right-head">
+              <div className="file-title" title={headerName ?? undefined}>
+                {headerName ? (
+                  <span className="file-title-name">{headerName}</span>
+                ) : (
+                  <span className="file-title-empty">Drop a file to start</span>
+                )}
               </div>
-              {mode === 'paint' && hasResult && (
-                <label className="toggle toggle-inline">
-                  <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
-                  <span>Show modifier prisms</span>
-                </label>
-              )}
+              <div className="panel-right-head-actions">
+                {mode === 'paint' && hasResult && (
+                  <label className="toggle toggle-inline">
+                    <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
+                    <span>Show modifier prisms</span>
+                  </label>
+                )}
+                <a className="gh-link" href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="Source on GitHub" title="Source on GitHub">
+                  <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                  </svg>
+                  <span>GitHub</span>
+                </a>
+              </div>
             </div>
 
-            <div className="viewport">
-              <div className="view-pane" style={{ display: view === '3d' ? 'block' : 'none' }}>
+            <div className="viewport" aria-busy={showLoading}>
+              <div className="view-pane">
                 <Viewer3D
                   result={result}
                   hexes={hexes}
@@ -541,22 +583,23 @@ export default function App() {
                   showModifiers={showModifiers}
                   bed={bed}
                   fitKey={fitKey}
-                  active={view === '3d'}
+                  active={true}
                 />
               </div>
-              <div className="view-pane view-pane-scroll" style={{ display: view === '2d' ? 'block' : 'none' }}>
-                <Map2D result={result} hexes={hexes} hidden={hidden} imageUrl={image?.url ?? null} active={view === '2d'} />
-              </div>
 
-              {!hasResult && (
+              {!hasResult && !showLoading && (
                 <div className="empty-state">
-                  <div className="empty-icon" aria-hidden>
-                    🔧
+                  <div className="empty-card">
+                    <div className="empty-icon" aria-hidden>
+                      🔧
+                    </div>
+                    <h3>{emptyTitle}</h3>
+                    <p>{emptyBody}</p>
                   </div>
-                  <h3>{emptyTitle}</h3>
-                  <p>{emptyBody}</p>
                 </div>
               )}
+
+              {showLoading && <ViewportLoading label={loadingLabel} />}
             </div>
 
             <StatusLine running={running} stage={stage} error={error} result={result} />
@@ -576,35 +619,6 @@ export default function App() {
           </div>
         </div>
       </main>
-
-      <footer className="site-footer">
-        {presets && (
-          <p>
-            Call of Duty camouflage artwork © Activision. Fan project, not affiliated with or endorsed by Activision. Camo images via the{' '}
-            <a href="https://callofduty.fandom.com/" target="_blank" rel="noreferrer">
-              Call of Duty Wiki
-            </a>{' '}
-            (Fandom).
-          </p>
-        )}
-        <p>
-          Filament data from{' '}
-          <a href="https://filamentcolors.xyz" target="_blank" rel="noreferrer">
-            filamentcolors.xyz
-          </a>{' '}
-          and{' '}
-          <a href="https://github.com/Donkie/SpoolmanDB" target="_blank" rel="noreferrer">
-            SpoolmanDB
-          </a>{' '}
-          (MIT).
-        </p>
-        <p>
-          <a href={REPO_URL} target="_blank" rel="noopener noreferrer">
-            Source on GitHub
-          </a>{' '}
-          · MIT license
-        </p>
-      </footer>
     </div>
   );
 }

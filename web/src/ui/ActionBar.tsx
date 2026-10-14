@@ -74,22 +74,20 @@ export function ActionBar(props: ActionBarProps) {
   return (
     <div className="actionbar">
       <div className="actionbar-row">
-        <label
-          className={`perpart-toggle${props.perPartAvailable ? '' : ' is-disabled'}`}
+        <button
+          type="button"
+          className={`toggle-btn${props.perPart && props.perPartAvailable ? ' is-on' : ''}`}
+          aria-pressed={props.perPart && props.perPartAvailable}
+          disabled={!props.perPartAvailable}
           title={
             props.perPartAvailable
               ? 'Export each part as its own object with its own modifiers, so you can print it on its own plate.'
               : 'Load a model with more than one part to enable per-part modifiers.'
           }
+          onClick={() => props.onPerPart(!props.perPart)}
         >
-          <input
-            type="checkbox"
-            checked={props.perPart && props.perPartAvailable}
-            disabled={!props.perPartAvailable}
-            onChange={(e) => props.onPerPart(e.target.checked)}
-          />
-          <span>Per-part modifiers</span>
-        </label>
+          Per-part: {props.perPart && props.perPartAvailable ? 'ON' : 'OFF'}
+        </button>
 
         <div className="actionbar-actions">
           <button type="button" className="pill" disabled={disabled || busyAny} onClick={() => props.onExport('stl-zip')}>
