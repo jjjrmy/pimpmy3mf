@@ -11,6 +11,8 @@ import { Legend, StatusLine } from './ui/Legend';
 import { Downloads } from './ui/Downloads';
 import { hexToRgb } from './ui/colorMap';
 import { useFilaments } from './ui/useFilaments';
+import { usePresets } from './ui/usePresets';
+import type { PresetItem } from './shared/presets';
 import { DEFAULT_BRANDS, rankSuggestions, resolveBrands } from './shared/filaments';
 
 const PRINTER_KEY = 'pimpmy3mf.printerId';
@@ -157,6 +159,23 @@ export default function App() {
       setError(null);
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  // camo presets (R2-hosted): picking one loads it exactly like an uploaded image
+  const presets = usePresets();
+  const [presetBusy, setPresetBusy] = useState<string | null>(null);
+  const onPreset = async (item: PresetItem) => {
+    setPresetBusy(item.id);
+    try {
+      const res = await fetch(`/presets/${item.file}`);
+      if (!res.ok) throw new Error(`Couldn't load the "${item.name}" preset (${res.status}).`);
+      const blob = await res.blob();
+      await onImage(new File([blob], item.file, { type: blob.type || 'image/webp' }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPresetBusy(null);
     }
   };
 
@@ -330,6 +349,9 @@ export default function App() {
             onMode={onModeChange}
             image={image ? { url: image.url, width: image.width, height: image.height } : null}
             onImage={onImage}
+            presets={presets}
+            onPreset={onPreset}
+            presetBusy={presetBusy}
             model={model}
             onModel={onModel}
             onClearModel={onClearModel}
@@ -365,6 +387,24 @@ export default function App() {
               onPrinterId={setPrinterId}
             />
           </section>
+          <footer className="site-footer">
+            {presets && (
+              <p>
+                Call of Duty camouflage artwork © Activision. Fan project, not affiliated with or endorsed by
+                Activision. Camo images via the{' '}
+                <a href="https://callofduty.fandom.com/" target="_blank" rel="noreferrer">
+                  Call of Duty Wiki
+                </a>{' '}
+                (Fandom).
+              </p>
+            )}
+            <p>
+              <a href="https://github.com/jjjrmy/pimpmy3mf" target="_blank" rel="noreferrer">
+                pimpmy3mf on GitHub
+              </a>{' '}
+              · MIT
+            </p>
+          </footer>
         </aside>
 
         <section className="right">

@@ -1,5 +1,5 @@
-// Cloudflare Worker: serves the built app (Workers Static Assets) and one small API route,
-// /api/filaments (filamentcolors.xyz swatches, slimmed + edge-cached 24 h; see worker/index.ts).
+// Cloudflare Worker: serves the built app (Workers Static Assets) plus /api/filaments (filamentcolors.xyz
+// swatches, edge-cached), /api/presets + /presets/* (camo presets from R2) and the www -> apex redirect.
 // All image -> 3D processing happens in the browser; nothing is uploaded.
 //   bun run worker:dev    build + wrangler dev (local)
 //   bun run deploy        build + wrangler deploy (account comes from `wrangler login`)
@@ -15,6 +15,9 @@
     // the worker runs first for every request: it serves /api/*, redirects www -> apex, then hands off to assets
     "run_worker_first": true
   },
+  // camo preset images + manifest.json (third-party artwork: hosted only in R2, never in the repo).
+  // Filled by scripts/presets/; the app hides the picker when this is missing or empty.
+  "r2_buckets": [{ "binding": "PRESETS", "bucket_name": "pimpmy3mf-presets" }],
   // keep the *.workers.dev URL alongside the custom domains
   "workers_dev": true,
   "routes": [

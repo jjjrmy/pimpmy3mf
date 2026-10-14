@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Axis, Params, Result, RGB } from '../core/types';
+import type { PresetItem, PresetManifest } from '../shared/presets';
 import { DropZone } from './DropZone';
+import { PresetPicker } from './PresetPicker';
 import { Slider } from './Slider';
 import { hexToRgb, rgbToHex } from './colorMap';
 
@@ -12,6 +14,10 @@ interface ControlsPanelProps {
   onMode: (m: 'image' | 'paint') => void;
   image: { url: string; width: number; height: number } | null;
   onImage: (f: File) => void;
+  /** Camo presets (null = none available; the picker hides). */
+  presets: PresetManifest | null;
+  onPreset: (item: PresetItem) => void;
+  presetBusy: string | null;
   model: ModelSummary | null;
   onModel: (f: File) => void;
   onClearModel: () => void;
@@ -168,6 +174,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
             </div>
           ) : undefined}
         </DropZone>
+        {props.presets && <PresetPicker manifest={props.presets} onPick={props.onPreset} busyId={props.presetBusy} />}
       </section>
 
       {/* ---- mode ---- */}

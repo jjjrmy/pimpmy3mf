@@ -28,6 +28,13 @@ Both use the same algorithm.
   - Each color becomes a Bambu modifier volume.
   - Multi-part and multi-object 3MFs keep their structure: parts stay separate and named, and
     every object gets its own modifiers.
+- **Camo presets:** a searchable gallery of camo swatches, filterable by game, in the Image panel.
+  Picking one loads it like an upload.
+  - The images are third-party artwork. They are NOT in this repo; they live in a Cloudflare R2
+    bucket served by the Worker (`/api/presets`, `/presets/<file>`).
+  - `scripts/presets/` collects them through the Fandom MediaWiki API, converts them to WebP,
+    writes a manifest and uploads to R2, all from a git-ignored `presets-data/` folder.
+  - Without the R2 binding or data (forks, `vite dev`), the picker simply doesn't show.
 - **Pattern rotation and offset** in both modes. The pattern wraps, so nothing is ever left
   uncovered.
 - **Filament suggestions:** ◀ ▶ through real filaments from [filamentcolors.xyz](https://filamentcolors.xyz)
@@ -78,13 +85,16 @@ src/core/         geometry + file formats (no DOM; runs in the Web Worker and un
 src/shared/       filament data: slimming, CIELAB, CIEDE2000, ranking (used by app + worker)
 src/worker/       pipeline Web Worker + typed client
 src/ui/           React components (controls, three.js viewer, 2D map, legend, downloads)
-worker/           Cloudflare Worker: static assets + /api/filaments (edge-cached filamentcolors.xyz pages)
+worker/           Cloudflare Worker: static assets, /api/filaments (edge-cached filamentcolors.xyz pages),
+                  /api/presets + /presets/* (camo presets from R2), www -> apex redirect
 scripts/
   headless.ts                 run the pipeline under bun: bun scripts/headless.ts in.rgba --out dir [...]
   decode-image.py             image -> .rgba for headless.ts
   capture-bambu-templates.py  regenerate the Bambu templates from a local Bambu Studio (system presets only)
   validate-bambu.ts           build projects and slice them with the Bambu Studio CLI
   render-gcode.py             top-down G-code render colored by filament (used by the validator)
+  presets/                    camo presets: fetch_camos.py (discover) -> build_presets.py (WebP + manifest)
+                              -> upload_r2.py (to the R2 bucket); output in git-ignored presets-data/
 ```
 
 Test fixtures live in the git-ignored `scratch/` folder.
