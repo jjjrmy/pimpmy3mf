@@ -31,8 +31,14 @@ Both use the same algorithm.
   - **Per-part modifiers** (checkbox, shown for multi-part models): every part becomes its own object
     with its own cropped modifiers, so each part can go on its own plate in any orientation. The camo
     stays exactly where it was in the assembled pose, so the seams line up after assembly.
-- **MW2 camo presets:** a thumbnail grid of the Call of Duty: Modern Warfare 2 (2009) camo swatches
-  in the Image panel. Picking one loads it like an upload.
+- **UI:** "The 3MF Pimper", styled after the MTV *Pimp My Ride* Flash game.
+  - Drag an image or a model anywhere on the page. Loading a model switches to paint mode.
+  - The TEXTURE / DESIGN / COLORS tabs hold the controls.
+  - The green buttons export.
+  - Headings use [Lilita One](https://fonts.google.com/specimen/Lilita+One) (SIL OFL, self-hosted
+    in `public/fonts/`).
+- **MW2 camo presets:** glossy round swatches of the Call of Duty: Modern Warfare 2 (2009) camos on
+  the TEXTURE tab. Picking one loads it like an upload.
   - The images are third-party artwork. They are NOT in this repo; they live in a Cloudflare R2
     bucket served by the Worker (`/api/presets`, `/presets/<file>`).
   - `scripts/presets/` collects them through the Fandom MediaWiki API, converts them to WebP,

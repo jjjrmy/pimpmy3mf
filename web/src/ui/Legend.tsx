@@ -104,11 +104,10 @@ function SuggestionStrip({
         <div className="suggest-body suggest-idle">
           <span className="suggest-swatch" style={{ background: list[0].filament.hex }} aria-hidden />
           <span className="suggest-text">
-            <span className="suggest-name">
-              Detected color <SourceBadge source={list[0].filament.source} />
-            </span>
+            <span className="suggest-name">Detected color</span>
             <span className="suggest-meta">
-              ▶ {list.length} filament matches · closest {list[0].filament.brand} (ΔE {list[0].deltaE.toFixed(1)})
+              ▶ {list.length} filament matches · closest {list[0].filament.brand} (ΔE {list[0].deltaE.toFixed(1)}){' '}
+              <SourceBadge source={list[0].filament.source} />
             </span>
           </span>
         </div>
