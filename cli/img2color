@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# img2color launcher: runs img2color.py inside its own virtualenv (built on first run).
+# Symlink this file onto your PATH, e.g.  ln -s "$PWD/img2color" ~/.local/bin/img2color
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do                       # follow the PATH symlink back to this folder
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ $src != /* ]] && src="$dir/$src"
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
+venv="$here/.venv"
+if [ ! -x "$venv/bin/python" ] || [ "$here/requirements.txt" -nt "$venv/.installed" ]; then
+  echo "img2color: setting up its Python environment (one time)..." >&2
+  python3 -m venv "$venv"
+  "$venv/bin/pip" install -q --upgrade pip
+  "$venv/bin/pip" install -q -r "$here/requirements.txt"
+  touch "$venv/.installed"
+fi
+exec "$venv/bin/python" "$here/img2color.py" "$@"

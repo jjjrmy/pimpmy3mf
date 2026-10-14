@@ -1,0 +1,35 @@
+{
+  "name": "pimpmy3mf",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Turn an image into a multi-color 3D print: one shape per color, or paint your own model, exported as Bambu Studio projects. Runs in the browser; served by a Cloudflare Worker.",
+  "license": "MIT",
+  "repository": "github:jjjrmy/pimpmy3mf",
+  "type": "module",
+  "scripts": {
+    "dev": "bunx --bun vite",
+    "build": "bunx --bun vite build",
+    "preview": "bunx --bun vite preview",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p worker",
+    "worker:dev": "bunx --bun vite build && wrangler dev",
+    "deploy": "bunx --bun vite build && wrangler deploy"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "manifold-3d": "^3.5.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261014.1",
+    "@types/bun": "^1.4.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "wrangler": "^4.151.0"
+  }
+}

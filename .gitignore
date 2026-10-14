@@ -1,0 +1,21 @@
+# web app (web/)
+node_modules/
+dist/
+.wrangler/
+# local test fixtures / scratch output (third-party models, images) - never commit
+scratch/
+# downloaded camo preset images (hosted in R2, never committed)
+presets-data/
+
+# cli (cli/)
+.venv/
+__pycache__/
+*.pyc
+
+# secrets / local config
+.env*
+.dev.vars*
+
+# misc
+*.log
+.DS_Store
