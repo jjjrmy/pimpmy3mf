@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ColorRegion, Result } from '../core/types';
 import { deltaE2000, hexToLab, MATERIAL_CLASSES, type Filament, type Suggestion } from '../shared/filaments';
 import { BrandFilter } from './BrandFilter';
+import { MaterialFilter } from './MaterialFilter';
 
 interface LegendProps {
   regions: ColorRegion[];
@@ -188,13 +189,7 @@ export function Legend(props: LegendProps) {
             <span className="legend-filters">
               <label className="legend-material">
                 <span className="dim">Material</span>
-                <select aria-label="Filament material" value={props.material} onChange={(e) => props.onMaterial(e.target.value)}>
-                  {MATERIAL_CLASSES.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
+                <MaterialFilter options={[...MATERIAL_CLASSES]} value={props.material} onChange={props.onMaterial} />
               </label>
               <BrandFilter
                 brands={props.brands}
@@ -217,15 +212,14 @@ export function Legend(props: LegendProps) {
           return (
             <li key={r.index} className={`legend-row${isHidden ? ' is-hidden' : ''}`}>
               <div className="legend-line">
-                <button
-                  type="button"
-                  className="legend-eye"
-                  aria-pressed={!isHidden}
-                  title={isHidden ? 'Show' : 'Hide'}
-                  onClick={() => onToggle(r.index)}
-                >
-                  {isHidden ? '🚫' : '👁'}
-                </button>
+                <input
+                  type="checkbox"
+                  className="vis-check"
+                  checked={!isHidden}
+                  aria-label={`Show color #${r.index + 1}`}
+                  title={isHidden ? 'Show color' : 'Hide color'}
+                  onChange={() => onToggle(r.index)}
+                />
                 <span className="legend-swatch" style={{ background: hex }} aria-hidden />
                 <span className="legend-num">#{r.index + 1}</span>
                 <HexField value={hex} onCommit={(h) => onHexChange(r.index, h)} />
@@ -271,6 +265,7 @@ export function StatusLine({ running, stage, error, result }: StatusLineProps) {
   if (running) return <div className="status status-busy">⏳ {stage ?? 'Working…'}</div>;
   if (!result) return <div className="status">Ready.</div>;
   const { stats, tile } = result;
+  // result.warnings surface as toasts now, not inline here
   return (
     <div className="status">
       <span>
@@ -280,11 +275,6 @@ export function StatusLine({ running, stage, error, result }: StatusLineProps) {
       <span className="status-dim">
         grid {stats.gridW}×{stats.gridH} @ {stats.pitch.toFixed(3)} mm · {Math.round(stats.ms)} ms
       </span>
-      {result.warnings.map((w, i) => (
-        <span key={i} className="status-warn">
-          ⚠ {w}
-        </span>
-      ))}
     </div>
   );
 }

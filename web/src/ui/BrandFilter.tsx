@@ -71,7 +71,7 @@ export function BrandFilter({ brands, pinned, selected, onChange, onResetDefault
       <button
         ref={btnRef}
         type="button"
-        className="brand-btn"
+        className="menu-field"
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => {
@@ -79,7 +79,7 @@ export function BrandFilter({ brands, pinned, selected, onChange, onResetDefault
           setOpen((o) => !o);
         }}
       >
-        Brand: {selected.size === brands.length ? 'All' : selected.size} ▾
+        <span className="menu-field-value">Brand: {selected.size === brands.length ? 'All' : selected.size}</span>
       </button>
       {open && pos && (
         <div className="brand-pop" role="dialog" aria-label="Filter brands" style={{ right: pos.right, bottom: pos.bottom }}>

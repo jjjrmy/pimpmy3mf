@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Axis, Params, Result } from '../core/types';
 import { Slider } from './Slider';
@@ -15,8 +15,6 @@ interface DesignTabProps {
   onParams: (patch: Partial<Params>) => void;
   mode: 'image' | 'paint';
   model: ModelSummary | null;
-  onModel: (f: File) => void;
-  onClearModel: () => void;
   /** Hidden parts, keyed `${objectIndex}:${partIndex}`. */
   hiddenParts: Set<string>;
   onTogglePart: (key: string) => void;
@@ -24,8 +22,6 @@ interface DesignTabProps {
   onLockAspect: (v: boolean) => void;
   result: Result | null;
 }
-
-const MODEL_ACCEPT = '.stl,.3mf,.obj';
 
 const AXES: { value: Axis; label: string }[] = [
   { value: 'z', label: 'Top-down (z)' },
@@ -42,7 +38,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** Objects and their parts, each with a show/hide toggle. Only shown when there is more than one part. */
+/** Objects and their parts, each with a show/hide checkbox (checked = visible). Shown when >1 part. */
 function PartsList({ model, hidden, onToggle }: { model: ModelSummary; hidden: Set<string>; onToggle: (key: string) => void }) {
   const multiObject = model.objects.length > 1;
   return (
@@ -60,16 +56,14 @@ function PartsList({ model, hidden, onToggle }: { model: ModelSummary; hidden: S
               const isHidden = hidden.has(key);
               return (
                 <li key={key} className={`parts-row${isHidden ? ' is-hidden' : ''}`}>
-                  <button
-                    type="button"
-                    className="legend-eye"
-                    aria-pressed={!isHidden}
-                    aria-label={isHidden ? `Show ${p}` : `Hide ${p}`}
+                  <input
+                    type="checkbox"
+                    className="vis-check"
+                    checked={!isHidden}
+                    aria-label={`Show ${p}`}
                     title={isHidden ? 'Show part' : 'Hide part'}
-                    onClick={() => onToggle(key)}
-                  >
-                    {isHidden ? '🚫' : '👁'}
-                  </button>
+                    onChange={() => onToggle(key)}
+                  />
                   <span className="parts-name" title={p}>
                     {p}
                   </span>
@@ -85,7 +79,6 @@ function PartsList({ model, hidden, onToggle }: { model: ModelSummary; hidden: S
 
 export function DesignTab(props: DesignTabProps) {
   const { params, onParams, mode, model, result } = props;
-  const inputRef = useRef<HTMLInputElement>(null);
   const [tileWidth, setTileWidth] = useState<number>(params.width ?? 60);
   const repeat = mode === 'paint' && params.width != null;
 
@@ -99,54 +92,13 @@ export function DesignTab(props: DesignTabProps) {
 
   return (
     <div className="tab-body">
-      {/* ---- model ---- */}
-      <section className="control-group">
-        <h3 className="tab-subhead">Model</h3>
-        <input
-          ref={inputRef}
-          type="file"
-          accept={MODEL_ACCEPT}
-          hidden
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) props.onModel(file);
-            e.target.value = '';
-          }}
-        />
-        {model ? (
-          <>
-            <div className="model-row">
-              <div className="model-icon" aria-hidden>
-                ◆
-              </div>
-              <div className="model-meta">
-                <div className="model-name" title={model.name}>
-                  {model.name}
-                </div>
-                <div className="dim">
-                  {model.objects.length > 1 && `${model.objects.length} objects · `}
-                  {parts > 1 ? `${parts} parts · ` : ''}
-                  {model.triangles.toLocaleString()} triangles
-                </div>
-              </div>
-              <button type="button" className="icon-x" title="Remove model" aria-label="Remove model" onClick={props.onClearModel}>
-                ✕
-              </button>
-            </div>
-            {parts > 1 && <PartsList model={model} hidden={props.hiddenParts} onToggle={props.onTogglePart} />}
-          </>
-        ) : (
-          <div className="model-row model-row-empty">
-            <div className="model-meta">
-              <div className="model-name">No model</div>
-              <div className="dim">Drop an STL / 3MF / OBJ anywhere to paint it.</div>
-            </div>
-            <button type="button" className="btn-chunky btn-chunky-sm" onClick={() => inputRef.current?.click()}>
-              Upload model
-            </button>
-          </div>
-        )}
-      </section>
+      {/* ---- parts (model with >1 part) ---- */}
+      {model && parts > 1 && (
+        <section className="control-group">
+          <h3 className="tab-subhead">Parts</h3>
+          <PartsList model={model} hidden={props.hiddenParts} onToggle={props.onTogglePart} />
+        </section>
+      )}
 
       {/* ---- size (tile mode) ---- */}
       {mode === 'image' && (

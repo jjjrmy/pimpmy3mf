@@ -61,7 +61,7 @@ export interface Params {
   minFeature: number;
   /** Tracing grid pitch in mm. */
   resolution: number;
-  /** Paint mode projection direction: z = top-down, y = from the front, x = from the side. */
+  /** Paint mode projection direction: z = top-down, y = from the front (default), x = from the side. */
   axis: Axis;
   /**
    * Pattern rotation in degrees, counter-clockwise in the 2D map (y up), about the frame center. Applied in
@@ -88,7 +88,7 @@ export const DEFAULT_PARAMS: Params = {
   smooth: 1,
   minFeature: 0.6,
   resolution: 0.1,
-  axis: 'z',
+  axis: 'y',
   rotation: 0,
   offsetX: 0,
   offsetY: 0,

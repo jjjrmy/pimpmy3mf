@@ -14,6 +14,7 @@ import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
 import { Viewer3D } from './ui/Viewer3D';
 import { Legend, StatusLine } from './ui/Legend';
+import { useToast } from './ui/Toast';
 import { hexToRgb } from './ui/colorMap';
 import { useFilaments } from './ui/useFilaments';
 import { usePresets } from './ui/usePresets';
@@ -129,7 +130,7 @@ export default function App() {
   };
 
   const [exportBusy, setExportBusy] = useState<ExportKind | null>(null);
-  const [exportWarnings, setExportWarnings] = useState<string[]>([]);
+  const toast = useToast();
 
   const patchParams = (patch: Partial<Params>) => setParams((p) => ({ ...p, ...patch }));
 
@@ -352,10 +353,18 @@ export default function App() {
           setRunning(false);
           setStage(null);
           setError(err.message);
+          toast({ kind: 'error', title: 'Something went wrong', message: err.message });
         });
     }, 250);
     return () => window.clearTimeout(handle);
   }, [image, model, mode, params, paletteMode, customPalette]);
+
+  // toast the pipeline's warnings once per new result (dedupe in the toaster guards re-renders)
+  useEffect(() => {
+    if (result?.warnings?.length) {
+      result.warnings.forEach((w) => toast({ kind: 'warning', title: 'Heads up', message: w }));
+    }
+  }, [result]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- derived -------------------------------------------------------------------------------
   const hexes = useMemo(() => (result ? result.regions.map((r, i) => overrides[i] ?? r.hex) : []), [result, overrides]);
@@ -367,14 +376,17 @@ export default function App() {
 
   const onExport = (kind: ExportKind, chosenPrinterId: string = printerId) => {
     setExportBusy(kind);
-    setExportWarnings([]);
     clientRef
       .current!.export(kind, { hexes, printerId: chosenPrinterId, plate: PLATE })
       .then((res) => {
         download(res.filename, res.bytes, res.mime);
-        setExportWarnings(res.warnings);
+        toast({ kind: 'success', title: 'Downloaded', message: res.filename });
+        res.warnings.forEach((w) => toast({ kind: 'warning', title: 'Heads up', message: w }));
       })
-      .catch((err: Error) => setError(err.message))
+      .catch((err: Error) => {
+        setError(err.message);
+        toast({ kind: 'error', title: 'Export failed', message: err.message });
+      })
       .finally(() => setExportBusy(null));
   };
 
@@ -488,15 +500,23 @@ export default function App() {
     <div className="app">
       <DropOverlay visible={dragging} />
 
+      <header className="topbar">
+        <img className="topbar-logo" src="/logo.svg" alt="Pimp My 3MF" width={198} height={128} />
+        <div className="topbar-title" title={headerName ?? undefined}>
+          {headerName && <span className="topbar-title-name">{headerName}</span>}
+        </div>
+        <a className="gh-link" href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="Source on GitHub" title="Source on GitHub">
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+          <span>GitHub</span>
+        </a>
+      </header>
+
       <main className="stage">
         <div className="panel">
           <div className="panel-left">
-            <div className="panel-left-head">
-              <h2 className="panel-heading">Design Your Print:</h2>
-              <span className="logo-bump">
-                <img className="panel-logo" src="/logo.svg" alt="Pimp My 3MF" width={198} height={128} />
-              </span>
-            </div>
+            <h2 className="panel-heading">Design Your Print:</h2>
             <TabStrip active={tab} onChange={setTab} />
             <div className="panel-left-body">
               <div role="tabpanel" id="panel-texture" aria-labelledby="tab-texture" hidden={tab !== 'texture'}>
@@ -507,6 +527,9 @@ export default function App() {
                   onPreset={onPreset}
                   presetBusy={presetBusy}
                   selectedPresetId={selectedPresetId}
+                  model={model}
+                  onModel={onModel}
+                  onClearModel={onClearModel}
                 />
               </div>
               <div role="tabpanel" id="panel-design" aria-labelledby="tab-design" hidden={tab !== 'design'}>
@@ -515,8 +538,6 @@ export default function App() {
                   onParams={patchParams}
                   mode={mode}
                   model={model}
-                  onModel={onModel}
-                  onClearModel={onClearModel}
                   hiddenParts={hiddenParts}
                   onTogglePart={(key) =>
                     setHiddenParts((prev) => {
@@ -549,30 +570,6 @@ export default function App() {
           </div>
 
           <div className="panel-right">
-            <div className="panel-right-head">
-              <div className="file-title" title={headerName ?? undefined}>
-                {headerName ? (
-                  <span className="file-title-name">{headerName}</span>
-                ) : (
-                  <span className="file-title-empty">Drop a file to start</span>
-                )}
-              </div>
-              <div className="panel-right-head-actions">
-                {mode === 'paint' && hasResult && (
-                  <label className="toggle toggle-inline">
-                    <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
-                    <span>Show modifier prisms</span>
-                  </label>
-                )}
-                <a className="gh-link" href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="Source on GitHub" title="Source on GitHub">
-                  <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor">
-                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-                  </svg>
-                  <span>GitHub</span>
-                </a>
-              </div>
-            </div>
-
             <div className="viewport" aria-busy={showLoading}>
               <div className="view-pane">
                 <Viewer3D
@@ -587,6 +584,13 @@ export default function App() {
                 />
               </div>
 
+              {mode === 'paint' && hasResult && (
+                <label className="viewport-prisms toggle toggle-inline">
+                  <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
+                  <span>Show modifier prisms</span>
+                </label>
+              )}
+
               {!hasResult && !showLoading && (
                 <div className="empty-state">
                   <div className="empty-card">
@@ -599,15 +603,16 @@ export default function App() {
                 </div>
               )}
 
+              <div className="viewport-status">
+                <StatusLine running={running} stage={stage} error={error} result={result} />
+              </div>
+
               {showLoading && <ViewportLoading label={loadingLabel} />}
             </div>
-
-            <StatusLine running={running} stage={stage} error={error} result={result} />
 
             <ActionBar
               disabled={!hasResult}
               busy={exportBusy}
-              warnings={exportWarnings}
               onExport={onExport}
               printers={PRINTERS}
               printerId={printerId}

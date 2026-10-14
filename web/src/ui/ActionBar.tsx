@@ -6,7 +6,6 @@ interface ActionBarProps {
   /** No result yet: every export is disabled. */
   disabled: boolean;
   busy: ExportKind | null;
-  warnings: string[];
   /** `printerId` is passed for the Bambu project so the export uses the popover's choice right away. */
   onExport: (kind: ExportKind, printerId?: string) => void;
   printers: PrinterPreset[];
@@ -193,14 +192,6 @@ export function ActionBar(props: ActionBarProps) {
           </div>
         </div>
       </div>
-
-      {props.warnings.length > 0 && (
-        <ul className="actionbar-warnings">
-          {props.warnings.map((w, i) => (
-            <li key={i}>⚠ {w}</li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }

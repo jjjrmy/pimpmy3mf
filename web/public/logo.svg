@@ -14,7 +14,17 @@
     <path id="shape-3MF-3" d="M245 338 C260 317 286 307 314 307 C350 306 370 323 365 348 C362 369 348 380 330 383 C351 385 359 397 353 418 C343 453 309 477 272 477 C238 477 214 462 215 441 C215 425 225 416 238 419 C251 422 253 432 247 440 C248 451 262 454 274 450 C290 445 300 431 305 414 C308 404 306 398 296 398 L279 401 C270 404 267 397 272 386 C276 375 281 373 291 373 L304 372 C320 371 330 360 332 346 C334 333 325 325 311 326 C296 327 288 336 283 348 C279 359 266 364 253 358 C246 354 243 346 245 338 Z" transform="translate(0 25)" fill-rule="evenodd"/>
     <path id="shape-3MF-M" d="M363 349 C355 348 355 341 363 336 C374 328 389 322 400 324 C408 325 410 331 410 341 L407 393 L449 334 C456 324 463 320 476 321 C490 322 490 331 486 345 L466 425 C463 437 467 441 477 437 C485 434 490 436 487 444 C481 455 468 463 453 463 C433 463 425 454 430 434 L447 367 L412 417 C407 424 398 428 388 426 C380 424 379 418 379 409 L382 363 L362 439 C358 455 347 463 333 461 C323 459 323 451 329 442 C341 421 351 390 359 361 C361 355 362 352 363 349 Z" transform="translate(32 25)" fill-rule="evenodd"/>
     <path id="shape-3MF-F" d="M542 349 C528 353 523 347 529 338 C540 320 567 310 594 311 L641 311 C659 311 670 303 674 296 C680 293 685 297 682 307 C678 326 667 341 645 343 L599 342 L585 383 L615 381 C630 379 639 375 646 370 C651 368 655 371 652 378 C647 394 636 403 619 404 L578 404 L568 435 C565 445 570 450 579 446 C588 442 593 448 587 457 C579 468 562 475 547 473 C529 470 526 459 533 440 L562 351 C566 341 562 336 553 342 C548 346 545 348 542 349 Z" transform="translate(0 25)" fill-rule="evenodd"/>
+    <filter id="sticker" filterUnits="objectBoundingBox" x="-18%" y="-18%" width="136%" height="136%" color-interpolation-filters="sRGB">
+      <feMorphology in="SourceAlpha" operator="dilate" radius="22" result="sticker-dilate"/>
+      <feFlood flood-color="#2a8fbf" result="sticker-blue"/>
+      <feComposite in="sticker-blue" in2="sticker-dilate" operator="in" result="sticker-outline"/>
+      <feMerge>
+        <feMergeNode in="sticker-outline"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
+  <g id="logo-art" filter="url(#sticker)">
   <g id="Pimp" inkscape:groupmode="layer" inkscape:label="Pimp" aria-label="Pimp" stroke-linejoin="round" stroke-linecap="round">
     <g id="Pimp-dimensional-shadow" inkscape:groupmode="layer" inkscape:label="Purple dimensional shadow" fill="#0B2560" stroke="#0B2560" stroke-width="14">
       <g transform="translate(3.00 56)">
@@ -425,7 +435,7 @@
       <use xlink:href="#shape-Pimp-m"/>
       <use xlink:href="#shape-Pimp-p"/>
     </g>
-    <g id="Pimp-gold-lettering" inkscape:groupmode="layer" inkscape:label="Gold lettering and red outline" fill="#FFCD00" stroke="#1E4FA0" stroke-width="6.5" paint-order="stroke fill">
+    <g id="Pimp-gold-lettering" inkscape:groupmode="layer" inkscape:label="Gold lettering and red outline" fill="#FFE61F" stroke="#1E4FA0" stroke-width="6.5" paint-order="stroke fill">
       <use id="letter-Pimp-capital-P" xlink:href="#shape-Pimp-capital-P"/>
       <use id="letter-Pimp-i-stem" xlink:href="#shape-Pimp-i-stem"/>
       <use id="letter-Pimp-i-dot" xlink:href="#shape-Pimp-i-dot"/>
@@ -616,7 +626,7 @@
       <use xlink:href="#shape-My-capital-M"/>
       <use xlink:href="#shape-My-y"/>
     </g>
-    <g id="My-gold-lettering" inkscape:groupmode="layer" inkscape:label="Gold lettering and red outline" fill="#FFCD00" stroke="#1E4FA0" stroke-width="5.4" paint-order="stroke fill">
+    <g id="My-gold-lettering" inkscape:groupmode="layer" inkscape:label="Gold lettering and red outline" fill="#FFE61F" stroke="#1E4FA0" stroke-width="5.4" paint-order="stroke fill">
       <use id="letter-My-capital-M" xlink:href="#shape-My-capital-M"/>
       <use id="letter-My-y" xlink:href="#shape-My-y"/>
     </g>
@@ -939,10 +949,11 @@
       <use xlink:href="#shape-3MF-M"/>
       <use xlink:href="#shape-3MF-F"/>
     </g>
-    <g id="3MF-gold-lettering" inkscape:groupmode="layer" inkscape:label="Gold lettering and red outline" fill="#FFCD00" stroke="#1E4FA0" stroke-width="6.5" paint-order="stroke fill">
+    <g id="3MF-gold-lettering" inkscape:groupmode="layer" inkscape:label="Gold lettering and red outline" fill="#FFE61F" stroke="#1E4FA0" stroke-width="6.5" paint-order="stroke fill">
       <use id="letter-3MF-3" xlink:href="#shape-3MF-3"/>
       <use id="letter-3MF-M" xlink:href="#shape-3MF-M"/>
       <use id="letter-3MF-F" xlink:href="#shape-3MF-F"/>
     </g>
+  </g>
   </g>
 </svg>

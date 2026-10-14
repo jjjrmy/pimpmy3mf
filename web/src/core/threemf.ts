@@ -607,12 +607,18 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: nu
   }
   const plates = Array.from({ length: nPlates }, () => ({ towerX: 5, towerY }));
 
+  // user-facing (shown as toasts); keep the word "re-arranged", the validator matches on it
+  const why = overlap ? 'they overlap when seen from above' : !allOnBed ? 'some of them weren’t resting on the bed' : 'there wasn’t room left for the prime tower';
   const warnings = [
-    `the objects don't fit a single plate as laid out (${overlap ? 'overlapping footprints' : !allOnBed ? 'not all resting on the bed' : 'no room for the prime tower'}); ` +
-      `re-arranged onto ${nPlates} plate${nPlates > 1 ? 's' : ''}, each object dropped to the bed`,
+    `Your objects were re-arranged onto ${nPlates} plate${nPlates > 1 ? 's' : ''} because ${why}. Each one now sits flat on the bed.`,
   ];
-  if (tooBig.length)
-    warnings.push(`${tooBig.length} object(s) are larger than the ${bed[0].toFixed(0)} x ${bed[1].toFixed(0)} mm bed and were placed alone; they may not slice`);
+  if (tooBig.length) {
+    const one = tooBig.length === 1;
+    warnings.push(
+      `${one ? 'One object is' : `${tooBig.length} objects are`} bigger than the ${bed[0].toFixed(0)} × ${bed[1].toFixed(0)} mm bed, ` +
+        `so ${one ? 'it got' : 'each got'} a plate of ${one ? 'its' : 'their'} own. ${one ? 'It' : 'They'} may not slice; try scaling down in Bambu Studio.`,
+    );
+  }
   return { transforms, plates, objectPlate, rearranged: true, warnings };
 }
 

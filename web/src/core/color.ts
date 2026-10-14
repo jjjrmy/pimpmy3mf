@@ -201,7 +201,7 @@ export function quantize(img: RasterImage, ncolors: number, palette: RGB[] | nul
       seen.add(((a + 2000) * 8000 + (b + 2000)) * 8000 + (c + 2000));
     }
     const k = Math.min(ncolors, seen.size);
-    if (k < ncolors) warnings.push(`image only has ${k} distinct colors; using ${k}`);
+    if (k < ncolors) warnings.push(`This image only has ${k} distinct color${k === 1 ? '' : 's'}, so it uses ${k} instead of ${ncolors}.`);
     const centers = kmeans(sLab, sN, k, rng);
     const kActual = centers.length / 3;
     nearest(lab, nop, centers, kActual, idx);
