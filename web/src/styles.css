@@ -109,20 +109,20 @@ body {
 }
 .topbar-logo {
   /* big wordmark straddling the panel's top edge: up onto the rust, down onto the blue panel */
-  position: absolute;
-  left: 70px;
-  bottom: -22px;
-  height: 126px;
-  width: auto;
   z-index: 6;
   pointer-events: none;
-  filter: drop-shadow(0 5px 4px rgba(0, 0, 0, 0.4));
+  filter: drop-shadow(0 5px 4px #0006);
+  width: auto;
+  height: 164px;
+  position: absolute;
+  bottom: -56px;
+  left: 180px;
 }
 .topbar-title {
   flex: 1;
   min-width: 0;
-  /* clear the logo and sit above the viewport column */
-  margin-left: 330px;
+  /* clear the logo (right edge ~434px) and line up with the viewport column (22 + 5 + 16 + 404 + 16 - 24 padding) */
+  margin-left: 439px;
 }
 .topbar-title-name {
   display: block;
