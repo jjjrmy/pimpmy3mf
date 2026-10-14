@@ -11,6 +11,10 @@ Strategy (MediaWiki API only, no HTML scraping):
   5. Filter (drop gif / tiny / non-image), dedupe by sha1, and pick the single
      best swatch per camo. Write presets-data/_discovery.json.
 
+Scope: by default only Call of Duty: Modern Warfare 2 (2009) camos are kept. Pass
+`--all` to widen to every game, or `--games "Game A,Game B"` to pick specific ones
+(game names exactly as the wiki writes them, e.g. "Call of Duty: Ghosts").
+
 Re-runnable: pass --refresh to re-hit the API; otherwise a cached discovery is reused.
 """
 import json
@@ -25,6 +29,10 @@ import wiki  # noqa: E402
 DISCOVERY = os.path.join(wiki.PRESETS_DATA, "_discovery.json")
 ROOT_CAT = "Category:Camouflages"
 WIKI_BASE = "https://callofduty.fandom.com/wiki/"
+
+# Default scope: only the 2009 Modern Warfare 2 weapon camos (the "Weapon camo
+# menu <name>" flat swatches). Pass --all / --games to widen.
+DEFAULT_GAMES = {"Call of Duty: Modern Warfare 2"}
 
 # "camo"/"camouflage" adjacent to "menu"/"icon", or the classic prefix families.
 MENU_RE = re.compile(
@@ -138,9 +146,16 @@ def is_flat_swatch(file_title, cbase):
     return False
 
 
-def discover():
+def discover(selected_games=None):
     game_cats = get_game_categories()
-    print(f"game categories: {len(game_cats)}")
+    if selected_games is not None:
+        game_cats = [c for c in game_cats
+                     if re.sub(r"\s+Camouflages$", "", c.split(":", 1)[1]) in selected_games]
+        missing = selected_games - {re.sub(r"\s+Camouflages$", "", c.split(":", 1)[1])
+                                    for c in game_cats}
+        if missing:
+            print(f"WARNING: no camo category for: {sorted(missing)}")
+    print(f"game categories in scope: {len(game_cats)}")
 
     article_games = defaultdict(set)  # article title -> {game names}
     for cat in game_cats:
@@ -207,6 +222,7 @@ def discover():
             "size": ii.get("size", 0),
             "sha1": ii.get("sha1", ""),
             "is_menu": is_menu,
+            "wcm": norm_name(ft).startswith("weapon camo menu"),
         }
         for art in file_articles[ft]:
             per_article[art].append(rec)
@@ -215,10 +231,11 @@ def discover():
     items = []
     for art in sorted(per_article):
         cands = per_article[art]
-        # rank: prefer canonical menu/icon swatches, then png>webp>jpg, then larger area
+        # rank: prefer the canonical "Weapon camo menu <name>" file, then any
+        # menu/icon swatch, then png>webp>jpg, then larger area.
         mime_rank = {"image/png": 2, "image/webp": 1, "image/jpeg": 0}
-        cands.sort(key=lambda r: (r["is_menu"], mime_rank.get(r["mime"], 0), r["w"] * r["h"]),
-                   reverse=True)
+        cands.sort(key=lambda r: (r["wcm"], r["is_menu"], mime_rank.get(r["mime"], 0),
+                                  r["w"] * r["h"]), reverse=True)
         chosen = cands[0]
         sha1 = chosen["sha1"]
         if sha1 in seen_sha1:
@@ -273,8 +290,22 @@ def discover():
     return out
 
 
+def parse_scope(argv):
+    """Return the set of game names to keep, or None for every game (--all)."""
+    if "--all" in argv:
+        return None
+    for i, a in enumerate(argv):
+        if a == "--games" and i + 1 < len(argv):
+            return {g.strip() for g in argv[i + 1].split(",") if g.strip()}
+        if a.startswith("--games="):
+            return {g.strip() for g in a.split("=", 1)[1].split(",") if g.strip()}
+    return set(DEFAULT_GAMES)
+
+
 def main():
     refresh = "--refresh" in sys.argv
+    selected = parse_scope(sys.argv)
+    scope_label = "ALL games" if selected is None else ", ".join(sorted(selected))
     os.makedirs(wiki.PRESETS_DATA, exist_ok=True)
     if os.path.exists(DISCOVERY) and not refresh:
         print(f"discovery cached at {DISCOVERY} (use --refresh to rebuild)")
@@ -283,7 +314,9 @@ def main():
         print(json.dumps(d["counts"], indent=2))
         print("skipped:", json.dumps(d.get("skipped", {})))
         return
-    out = discover()
+    print(f"scope: {scope_label}")
+    out = discover(selected)
+    out["scope"] = sorted(selected) if selected is not None else "all"
     with open(DISCOVERY, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\nwrote {DISCOVERY}")

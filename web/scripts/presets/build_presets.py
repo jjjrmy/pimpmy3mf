@@ -58,6 +58,15 @@ def main():
         })
 
     items.sort(key=lambda r: r["name"].lower())
+
+    # prune local webps that are no longer part of the set (keeps presets-data
+    # matching the manifest so the uploader's prune mirrors the bucket)
+    keep = {it["file"] for it in items}
+    for fn in os.listdir(wiki.PRESETS_DATA):
+        if fn.endswith(".webp") and fn not in keep:
+            os.remove(os.path.join(wiki.PRESETS_DATA, fn))
+            print(f"  removed stale {fn}")
+
     manifest = {
         "version": 1,
         "generated": datetime.datetime.now(datetime.timezone.utc)

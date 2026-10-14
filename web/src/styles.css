@@ -797,27 +797,15 @@ input[type='color'] {
 .preset-pop {
   position: fixed; /* left/top set inline from the button's rect */
   z-index: 40;
-  width: min(560px, calc(100vw - 16px));
+  width: min(440px, calc(100vw - 16px));
   max-height: min(560px, calc(100vh - 80px));
   display: flex;
   flex-direction: column;
-  gap: 8px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 12px;
-}
-.preset-head {
-  display: flex;
-  gap: 8px;
-}
-.preset-head select {
-  width: auto;
-  max-width: 45%;
-}
-.preset-count {
-  font-size: 12px;
 }
 .preset-grid {
   list-style: none;
@@ -860,9 +848,6 @@ input[type='color'] {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.preset-empty {
-  grid-column: 1 / -1;
 }
 .site-footer {
   padding: 4px 6px 12px;

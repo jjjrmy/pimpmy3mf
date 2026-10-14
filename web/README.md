@@ -28,8 +28,8 @@ Both use the same algorithm.
   - Each color becomes a Bambu modifier volume.
   - Multi-part and multi-object 3MFs keep their structure: parts stay separate and named, and
     every object gets its own modifiers.
-- **Camo presets:** a searchable gallery of camo swatches, filterable by game, in the Image panel.
-  Picking one loads it like an upload.
+- **MW2 camo presets:** a thumbnail grid of the Call of Duty: Modern Warfare 2 (2009) camo swatches
+  in the Image panel. Picking one loads it like an upload.
   - The images are third-party artwork. They are NOT in this repo; they live in a Cloudflare R2
     bucket served by the Worker (`/api/presets`, `/presets/<file>`).
   - `scripts/presets/` collects them through the Fandom MediaWiki API, converts them to WebP,

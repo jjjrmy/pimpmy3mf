@@ -42,6 +42,17 @@ def put(key, path, content_type):
         raise RuntimeError(f"upload failed for {key}:\n{r.stderr}")
 
 
+def delete(key):
+    r = wrangler(["r2", "object", "delete", f"{BUCKET}/{key}", "--remote"])
+    if r.returncode != 0:
+        raise RuntimeError(f"delete failed for {key}:\n{r.stderr}")
+
+
+def exists(key):
+    r = wrangler(["r2", "object", "get", f"{BUCKET}/{key}", "--remote", "--pipe"])
+    return r.returncode == 0
+
+
 def verify():
     r = wrangler(["r2", "object", "get", f"{BUCKET}/manifest.json", "--remote", "--pipe"])
     if r.returncode != 0:
@@ -56,6 +67,7 @@ def main():
     if "--verify" in sys.argv:
         verify()
         return
+    dry = "--dry-run" in sys.argv
 
     with open(MANIFEST) as f:
         manifest = json.load(f)
@@ -65,10 +77,26 @@ def main():
         with open(UPLOADED) as f:
             state = json.load(f)
 
-    # build (key -> local path) list: every webp + the manifest
+    # desired bucket contents: every manifest webp + the manifest itself
     jobs = [(it["file"], os.path.join(wiki.PRESETS_DATA, it["file"]), "image/webp")
             for it in manifest["items"]]
     jobs.append(("manifest.json", MANIFEST, "application/json"))
+    desired = {key for key, _, _ in jobs}
+
+    # objects we previously uploaded that are no longer wanted -> prune
+    stale = sorted(set(state) - desired)
+    print("=== prune plan (bucket objects not in manifest) ===")
+    for key in stale:
+        print(f"  DELETE {key}")
+    print(f"  ({len(stale)} object(s) to delete)")
+
+    if dry:
+        print("\n=== upload plan (--dry-run) ===")
+        for key, path, _ in jobs:
+            status = "skip" if state.get(key) == sha256(path) else "put"
+            print(f"  {status} {key}")
+        print("\n--dry-run: no changes made")
+        return
 
     uploaded = skipped = 0
     for key, path, ctype in jobs:
@@ -83,8 +111,20 @@ def main():
         with open(UPLOADED, "w") as f:  # persist incrementally (crash-safe)
             json.dump(state, f, indent=2)
 
-    print(f"\nuploaded {uploaded}, skipped {skipped} (already current)")
+    deleted = 0
+    for key in stale:
+        delete(key)
+        state.pop(key, None)
+        deleted += 1
+        print(f"  deleted {key}")
+        with open(UPLOADED, "w") as f:
+            json.dump(state, f, indent=2)
+
+    print(f"\nuploaded {uploaded}, skipped {skipped} (current), deleted {deleted}")
     verify()
+    if stale:
+        k = stale[0]
+        print(f"deleted key 404 check: {k} -> {'still present!' if exists(k) else 'gone (404) OK'}")
 
 
 if __name__ == "__main__":

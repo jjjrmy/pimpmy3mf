@@ -27,8 +27,10 @@ const TTL = 24 * 60 * 60;
 const STALE_TTL = 7 * 24 * 60 * 60;
 const CACHE_VERSION = 'v1';
 /** Preset manifest: short, so re-uploads show up quickly. Images: a week (keys are stable ids). */
-const MANIFEST_TTL = 10 * 60;
+const MANIFEST_TTL = 5 * 60;
 const IMAGE_TTL = 7 * 24 * 60 * 60;
+/** Bump when the preset set is replaced, so edge-cached manifests/images from the old set are bypassed at once. */
+const PRESETS_CACHE_VERSION = 'mw2-1';
 
 function json(body: unknown, status: number, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -106,10 +108,14 @@ export default {
     if (request.method === 'GET') {
       if (url.pathname === '/api/filaments') return filaments(url, ctx);
       if (url.pathname === '/api/presets') {
-        return fromR2(env.PRESETS, 'manifest.json', `${url.origin}/api/presets`, MANIFEST_TTL, 'application/json', ctx);
+        const key = `${url.origin}/api/presets?v=${PRESETS_CACHE_VERSION}`;
+        return fromR2(env.PRESETS, 'manifest.json', key, MANIFEST_TTL, 'application/json', ctx);
       }
       const m = /^\/presets\/([a-z0-9][a-z0-9._-]{0,120}\.webp)$/.exec(url.pathname);
-      if (m) return fromR2(env.PRESETS, m[1], `${url.origin}/presets/${m[1]}`, IMAGE_TTL, 'image/webp', ctx);
+      if (m) {
+        const key = `${url.origin}/presets/${m[1]}?v=${PRESETS_CACHE_VERSION}`;
+        return fromR2(env.PRESETS, m[1], key, IMAGE_TTL, 'image/webp', ctx);
+      }
     }
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/presets/')) return json({ error: 'not found' }, 404);
     return env.ASSETS.fetch(request);
