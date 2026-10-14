@@ -1,7 +1,19 @@
 import { useEffect, useState } from 'react';
-import { hexToLab, slimPage, upstreamPageUrl, type Filament, type FilamentPage, type Lab } from '../shared/filaments';
+import {
+  hexToLab,
+  mergeCatalog,
+  slimPage,
+  slimSpoolman,
+  SPOOLMAN_URL,
+  upstreamPageUrl,
+  type Filament,
+  type FilamentPage,
+  type Lab,
+  type SpoolmanRaw,
+} from '../shared/filaments';
 
-const CACHE_KEY = 'pimpmy3mf.filaments.v1';
+// v2: the catalog now merges filamentcolors.xyz (measured) with SpoolmanDB (maker) colors.
+const CACHE_KEY = 'pimpmy3mf.filaments.v2';
 const TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface FilamentEntry {
@@ -12,7 +24,7 @@ export interface FilamentEntry {
 export type FilamentState =
   | { status: 'loading' }
   | { status: 'error' }
-  | { status: 'ready'; items: FilamentEntry[]; families: string[] };
+  | { status: 'ready'; items: FilamentEntry[] };
 
 /** One slim page: our Worker route first (edge-cached), else filamentcolors.xyz directly (CORS *), e.g. under vite dev. */
 async function fetchPage(page: number, direct: boolean): Promise<{ data: FilamentPage; direct: boolean }> {
@@ -31,7 +43,7 @@ async function fetchPage(page: number, direct: boolean): Promise<{ data: Filamen
   return { data: slimPage(await res.json(), page), direct: true };
 }
 
-async function fetchAll(): Promise<Filament[]> {
+async function fetchMeasured(): Promise<Filament[]> {
   const first = await fetchPage(1, false);
   const all = [...first.data.results];
   const rest = Array.from({ length: first.data.pages - 1 }, (_, i) => i + 2);
@@ -41,6 +53,39 @@ async function fetchAll(): Promise<Filament[]> {
     for (const b of batch) all.push(...b.data.results);
   }
   return all;
+}
+
+/** The SpoolmanDB dump: our Worker proxy first, else the MIT dump directly (CORS *), e.g. under vite dev. */
+async function fetchMaker(): Promise<Filament[]> {
+  let raw: SpoolmanRaw[] | null = null;
+  try {
+    const res = await fetch('/api/filaments?source=spoolman', { signal: AbortSignal.timeout(30000) });
+    if (res.ok && (res.headers.get('content-type') ?? '').includes('application/json')) {
+      raw = (await res.json()) as SpoolmanRaw[];
+    }
+  } catch {
+    // fall through to upstream
+  }
+  if (!raw) {
+    const res = await fetch(SPOOLMAN_URL, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`SpoolmanDB ${res.status}`);
+    raw = (await res.json()) as SpoolmanRaw[];
+  }
+  const { results, multiColor } = slimSpoolman(Array.isArray(raw) ? raw : []);
+  if (multiColor) console.info(`[filaments] skipped ${multiColor} multi-color SpoolmanDB spools`);
+  return results;
+}
+
+/** Both sources in parallel, merged into one catalog. SpoolmanDB is optional: if it fails, fall back to measured only. */
+async function fetchAll(): Promise<Filament[]> {
+  const [measured, maker] = await Promise.all([
+    fetchMeasured(),
+    fetchMaker().catch((err) => {
+      console.warn('[filaments] SpoolmanDB unavailable, using measured colors only:', err);
+      return [] as Filament[];
+    }),
+  ]);
+  return mergeCatalog(measured, maker);
 }
 
 function readCache(): Filament[] | null {
@@ -64,13 +109,10 @@ function writeCache(items: Filament[]) {
 
 function toState(items: Filament[]): FilamentState {
   const entries = items.map((f) => ({ f, lab: hexToLab(f.hex) }));
-  const counts = new Map<string, number>();
-  for (const { f } of entries) if (f.family) counts.set(f.family, (counts.get(f.family) ?? 0) + 1);
-  const families = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
-  return { status: 'ready', items: entries, families };
+  return { status: 'ready', items: entries };
 }
 
-/** The filamentcolors.xyz swatch list, cached ~24 h in localStorage. 'error' when the API is unreachable. */
+/** The merged filament catalog (filamentcolors.xyz + SpoolmanDB), cached ~24 h in localStorage. 'error' when unreachable. */
 export function useFilaments(): FilamentState {
   const [state, setState] = useState<FilamentState>(() => {
     const cached = readCache();

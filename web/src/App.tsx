@@ -13,7 +13,7 @@ import { hexToRgb } from './ui/colorMap';
 import { useFilaments } from './ui/useFilaments';
 import { usePresets } from './ui/usePresets';
 import type { PresetItem } from './shared/presets';
-import { DEFAULT_BRANDS, rankSuggestions, resolveBrands } from './shared/filaments';
+import { DEFAULT_BRANDS, normalizeMaterial, rankSuggestions, resolveBrands } from './shared/filaments';
 
 const REPO_URL = 'https://github.com/jjjrmy/pimpmy3mf';
 const PRINTER_KEY = 'pimpmy3mf.printerId';
@@ -104,13 +104,16 @@ export default function App() {
     setHidden(new Set());
   }, [paletteMode, params.colors, customPalette]);
 
-  // ---- filament suggestions (filamentcolors.xyz) ----------------------------------------------
+  // ---- filament suggestions (filamentcolors.xyz + SpoolmanDB) --------------------------------
   const filaments = useFilaments();
-  // filters only change what the arrows cycle through; colors already picked stay as they are
-  const [material, setMaterialState] = useState<string>(() => localStorage.getItem(MATERIAL_KEY) ?? 'PLA');
+  // (migrates the old saved 'PLA' family value onto the new 'PLA (all)' material class)
+  const [material, setMaterialState] = useState<string>(() => normalizeMaterial(localStorage.getItem(MATERIAL_KEY)));
+  // changing the material resets every row to its detected color (clear overrides + picks), like per-row Reset
   const setMaterial = (m: string) => {
     setMaterialState(m);
     localStorage.setItem(MATERIAL_KEY, m);
+    setOverrides([]);
+    setPicks([]);
   };
   // brand filter: the saved selection, else the default list mapped onto the catalog's names (first visit / reset)
   const [savedBrands, setSavedBrands] = useState<string[] | null>(() => {
@@ -416,6 +419,17 @@ export default function App() {
               </p>
             )}
             <p>
+              Filament data from{' '}
+              <a href="https://filamentcolors.xyz" target="_blank" rel="noreferrer">
+                filamentcolors.xyz
+              </a>{' '}
+              and{' '}
+              <a href="https://github.com/Donkie/SpoolmanDB" target="_blank" rel="noreferrer">
+                SpoolmanDB
+              </a>{' '}
+              (MIT).
+            </p>
+            <p>
               <a href={REPO_URL} target="_blank" rel="noopener noreferrer">
                 Source on GitHub
               </a>{' '}
@@ -487,7 +501,6 @@ export default function App() {
               onToggle={toggleHidden}
               onReset={onResetColor}
               filamentStatus={filaments.status}
-              families={filaments.status === 'ready' ? filaments.families : []}
               material={material}
               onMaterial={setMaterial}
               suggestions={suggestions}

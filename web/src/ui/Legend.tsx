@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ColorRegion, Result } from '../core/types';
-import { deltaE2000, hexToLab, type Filament, type Suggestion } from '../shared/filaments';
+import { deltaE2000, hexToLab, MATERIAL_CLASSES, type Filament, type Suggestion } from '../shared/filaments';
 import { BrandFilter } from './BrandFilter';
 
 interface LegendProps {
@@ -13,8 +13,6 @@ interface LegendProps {
   /** Restore a row to its detected color. */
   onReset: (index: number) => void;
   filamentStatus: 'loading' | 'error' | 'ready';
-  /** Material families present in the filament data, most common first. */
-  families: string[];
   material: string;
   onMaterial: (m: string) => void;
   /** Per row: ranked filament suggestions for the detected color; null while loading / unavailable. */
@@ -29,6 +27,19 @@ interface LegendProps {
   onResetBrands: () => void;
   /** The default brands (catalog names, in the user's order), listed first in the brand dropdown. */
   pinnedBrands: string[];
+}
+
+/** Small pill marking where a suggestion's color came from. */
+function SourceBadge({ source }: { source: Filament['source'] }) {
+  return source === 'measured' ? (
+    <span className="suggest-badge is-measured" title="Measured color (filamentcolors.xyz)">
+      measured
+    </span>
+  ) : (
+    <span className="suggest-badge is-maker" title="Manufacturer-listed color (SpoolmanDB)">
+      maker color
+    </span>
+  );
 }
 
 function SuggestionStrip({
@@ -66,14 +77,18 @@ function SuggestionStrip({
           <span className="suggest-swatch" style={{ background: picked.hex }} aria-hidden />
           <span className="suggest-text">
             <span className="suggest-name" title={`${picked.brand} ${picked.name}`}>
-              <strong>{picked.brand}</strong> {picked.name}
+              <strong>{picked.brand}</strong> {picked.name} <SourceBadge source={picked.source} />
             </span>
             <span className="suggest-meta">
               {picked.type} · ΔE {dE.toFixed(1)} · {at >= 0 ? `${at + 1}/${list.length}` : 'outside current filters'}
-              {' · '}
-              <a href={`https://filamentcolors.xyz/swatch/${picked.slug}/`} target="_blank" rel="noreferrer">
-                swatch
-              </a>
+              {picked.source === 'measured' && (
+                <>
+                  {' · '}
+                  <a href={`https://filamentcolors.xyz/swatch/${picked.slug}/`} target="_blank" rel="noreferrer">
+                    swatch
+                  </a>
+                </>
+              )}
               {picked.url && (
                 <>
                   {' · '}
@@ -89,7 +104,9 @@ function SuggestionStrip({
         <div className="suggest-body suggest-idle">
           <span className="suggest-swatch" style={{ background: list[0].filament.hex }} aria-hidden />
           <span className="suggest-text">
-            <span className="suggest-name">Detected color</span>
+            <span className="suggest-name">
+              Detected color <SourceBadge source={list[0].filament.source} />
+            </span>
             <span className="suggest-meta">
               ▶ {list.length} filament matches · closest {list[0].filament.brand} (ΔE {list[0].deltaE.toFixed(1)})
             </span>
@@ -161,6 +178,10 @@ export function Legend(props: LegendProps) {
             Filament matches from{' '}
             <a href="https://filamentcolors.xyz" target="_blank" rel="noreferrer">
               filamentcolors.xyz
+            </a>{' '}
+            and{' '}
+            <a href="https://github.com/Donkie/SpoolmanDB" target="_blank" rel="noreferrer">
+              SpoolmanDB
             </a>
             {props.filamentStatus === 'loading' && ' · loading…'}
           </span>
@@ -169,12 +190,11 @@ export function Legend(props: LegendProps) {
               <label className="legend-material">
                 <span className="dim">Material</span>
                 <select aria-label="Filament material" value={props.material} onChange={(e) => props.onMaterial(e.target.value)}>
-                  {props.families.map((f) => (
-                    <option key={f} value={f}>
-                      {f}
+                  {MATERIAL_CLASSES.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
                     </option>
                   ))}
-                  <option value="Any">Any</option>
                 </select>
               </label>
               <BrandFilter

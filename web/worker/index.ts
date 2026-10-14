@@ -1,6 +1,7 @@
 // Cloudflare Worker: serves the built app (static assets) plus a few routes.
 //
-//   GET /api/filaments?page=N   one slimmed page of filamentcolors.xyz swatches ({ count, pages, page, results })
+//   GET /api/filaments?page=N          one slimmed page of filamentcolors.xyz swatches ({ count, pages, page, results })
+//   GET /api/filaments?source=spoolman  the SpoolmanDB filaments.json dump, proxied unparsed (~4.6 MB)
 //   GET /api/presets            the camo preset manifest (manifest.json in the PRESETS R2 bucket)
 //   GET /presets/<id>.webp      one preset image from R2
 //   www.pimpmy3mf.app/*         301 -> https://pimpmy3mf.app/*
@@ -12,7 +13,7 @@
 //
 // The preset images are third-party artwork and live only in R2 (never in the repo). The PRESETS binding is
 // optional: without it (forks, local dev without data) /api/presets 404s and the UI hides the picker.
-import { slimPage, upstreamPageUrl } from '../src/shared/filaments';
+import { slimPage, upstreamPageUrl, SPOOLMAN_URL } from '../src/shared/filaments';
 
 interface Env {
   ASSETS: Fetcher;
@@ -39,7 +40,47 @@ function json(body: unknown, status: number, extra: Record<string, string> = {})
   });
 }
 
+/**
+ * Proxy the SpoolmanDB dump WITHOUT parsing it (streaming the body keeps each invocation's CPU tiny; parsing
+ * 4.6 MB could blow the free-plan limit). Same edge-cache policy as the filamentcolors pages: served as-is for
+ * 24 h, kept up to STALE_TTL as a fallback for when SpoolmanDB is unreachable.
+ */
+async function spoolman(url: URL, ctx: ExecutionContext): Promise<Response> {
+  const cache = caches.default;
+  const key = new Request(`${url.origin}/api/filaments?source=spoolman&cache=${CACHE_VERSION}`);
+  const hit = await cache.match(key);
+  const age = hit ? (Date.now() - Number(hit.headers.get('x-fetched-at') ?? 0)) / 1000 : Infinity;
+  if (hit && age < TTL) return hit;
+
+  let upstream: Response | null = null;
+  try {
+    upstream = await fetch(SPOOLMAN_URL, {
+      headers: { accept: 'application/json', 'user-agent': 'pimpmy3mf (+https://pimpmy3mf.app)' },
+      signal: AbortSignal.timeout(25000),
+    });
+  } catch {
+    upstream = null;
+  }
+  if (!upstream?.ok || !upstream.body) {
+    if (hit) return hit;
+    return json({ error: upstream ? `SpoolmanDB returned ${upstream.status}` : 'SpoolmanDB unreachable' }, 502);
+  }
+
+  const res = new Response(upstream.body, {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'access-control-allow-origin': '*',
+      'cache-control': `public, max-age=${STALE_TTL}`,
+      'x-fetched-at': String(Date.now()),
+    },
+  });
+  ctx.waitUntil(cache.put(key, res.clone()));
+  return res;
+}
+
 async function filaments(url: URL, ctx: ExecutionContext): Promise<Response> {
+  if (url.searchParams.get('source') === 'spoolman') return spoolman(url, ctx);
   const page = Number(url.searchParams.get('page') ?? '1');
   if (!Number.isInteger(page) || page < 1 || page > 200) return json({ error: 'bad page' }, 400);
 

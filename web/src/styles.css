@@ -785,6 +785,27 @@ input[type='color'] {
   color: var(--text-dim);
   font-size: 11.5px;
 }
+.suggest-badge {
+  display: inline-block;
+  vertical-align: baseline;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1.5;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.suggest-badge.is-measured {
+  color: var(--accent);
+  border-color: rgba(91, 140, 255, 0.55);
+  background: rgba(91, 140, 255, 0.14);
+}
+.suggest-badge.is-maker {
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
 .pattern-reset {
   margin-top: 12px;
 }

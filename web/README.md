@@ -40,11 +40,20 @@ Both use the same algorithm.
   - Without the R2 binding or data (forks, `vite dev`), the picker simply doesn't show.
 - **Pattern rotation and offset** in both modes. The pattern wraps, so nothing is ever left
   uncovered.
-- **Filament suggestions:** ◀ ▶ through real filaments from [filamentcolors.xyz](https://filamentcolors.xyz)
-  for each color.
-  - The list is each brand's closest swatch (CIEDE2000), closest brand first, with material and
-    brand filters.
-  - Picking one sets that color everywhere, and Reset brings back the detected color.
+- **Filament suggestions:** ◀ ▶ through real filaments for each color, from two merged catalogs:
+  [filamentcolors.xyz](https://filamentcolors.xyz) (lab-**measured** colors) and
+  [SpoolmanDB](https://github.com/Donkie/SpoolmanDB) (manufacturer-listed **maker** colors). Each
+  suggestion carries a small `measured` / `maker color` badge. Multi-color SpoolmanDB spools are skipped
+  (a single hex would misrepresent them); brands are folded across both sources, keeping the
+  filamentcolors spelling when a brand appears in both.
+  - The list is each brand's closest swatch (CIEDE2000), closest brand first, with brand and material
+    filters. The material dropdown is normalized across both sources: **Any · PLA (all) · PLA basic ·
+    PLA+ / Pro / Tough · PETG · ABS · ASA · TPU · Other** (`materialClass` in `src/shared/filaments.ts`).
+    `PLA+ / Pro / Tough` is the +/Pro/Tough/Super/HTPLA strength grades; matte/silk/glow, wood-filled and
+    carbon-fiber PLA count as `PLA basic`. PCTG/PETG-CF/HF and CPE fold into PETG; PET/PET-CF and PC/ABS
+    blends fall to Other. Default is `PLA (all)`.
+  - Picking one sets that color everywhere, and Reset brings back the detected color. Changing the
+    material filter resets every row to its detected color (changing brands leaves picks alone).
 - **Downloads:**
 
   | Button | File |
@@ -88,8 +97,9 @@ src/core/         geometry + file formats (no DOM; runs in the Web Worker and un
 src/shared/       filament data: slimming, CIELAB, CIEDE2000, ranking (used by app + worker)
 src/worker/       pipeline Web Worker + typed client
 src/ui/           React components (controls, three.js viewer, 2D map, legend, downloads)
-worker/           Cloudflare Worker: static assets, /api/filaments (edge-cached filamentcolors.xyz pages),
-                  /api/presets + /presets/* (camo presets from R2), www -> apex redirect
+worker/           Cloudflare Worker: static assets, /api/filaments (edge-cached filamentcolors.xyz pages;
+                  ?source=spoolman proxies the SpoolmanDB dump unparsed), /api/presets + /presets/*
+                  (camo presets from R2), www -> apex redirect
 scripts/
   headless.ts                 run the pipeline under bun: bun scripts/headless.ts in.rgba --out dir [...]
   decode-image.py             image -> .rgba for headless.ts
@@ -111,7 +121,8 @@ Test fixtures live in the git-ignored `scratch/` folder.
 
 ## Credits
 
-- Filament color data: [filamentcolors.xyz](https://filamentcolors.xyz).
+- Filament color data: [filamentcolors.xyz](https://filamentcolors.xyz) and
+  [SpoolmanDB](https://github.com/Donkie/SpoolmanDB) (MIT).
 - Geometry: [manifold-3d](https://github.com/elalish/manifold).
 - 3D preview: [three.js](https://threejs.org).
 - Zip/3MF packaging: [fflate](https://github.com/101arrowz/fflate).
