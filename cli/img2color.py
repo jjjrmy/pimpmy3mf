@@ -16,7 +16,8 @@ Image mode (default) writes <image folder>/<stem>-<N>colors/:
   colors.txt                    filament # -> hex -> coverage
 
 Paint mode (--apply-to MODEL) colors an existing model instead. The color shapes become tall
-modifier volumes projected through the model: top-down by default, or --axis x|y for side views.
+modifier volumes projected through the model: from the front by default (--axis y), or --axis z
+for top-down and --axis x for the side.
 The 3MF holds the model on filament 1 (the most common color) plus one modifier per other color.
 A multi-part / multi-object 3MF keeps its parts and objects separate.
 
@@ -888,8 +889,8 @@ def main():
     ap.add_argument("--offset", default="0,0", metavar="X,Y",
                     help="shift the pattern by X,Y mm after rotating (+X right, +Y up in the preview)")
     ap.add_argument("-a", "--apply-to", metavar="MODEL", help="paint this model (.stl/.3mf/.obj) with the colors")
-    ap.add_argument("--axis", choices=["z", "y", "x"], default="z",
-                    help="--apply-to projection direction: z = top-down (default), y = front, x = side")
+    ap.add_argument("--axis", choices=["z", "y", "x"], default="y",
+                    help="--apply-to projection direction: y = front (default), z = top-down, x = side")
     ap.add_argument("--per-part", action="store_true",
                     help="--apply-to only: make each input part its own object with its own modifiers "
                     "cropped to that part (the shared texture stays put), so parts print separately")
