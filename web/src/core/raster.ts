@@ -19,8 +19,12 @@ function gaussianKernel(sigma: number): Float64Array {
   return k;
 }
 
-/** Separable Gaussian blur of a HxW Float32 image. wrap = periodic, else replicate edge. */
-export function gaussianFilter2D(src: Float32Array, H: number, W: number, sigma: number, wrap: boolean): Float32Array {
+/**
+ * Separable Gaussian blur of a HxW Float32 image. wrapX/wrapY = periodic along that axis, else
+ * replicate edge. Planar callers pass wrapX === wrapY (the old single-`wrap` behaviour); the
+ * cylindrical path wraps horizontally (u) only / independently.
+ */
+export function gaussianFilter2D(src: Float32Array, H: number, W: number, sigma: number, wrapX: boolean, wrapY: boolean): Float32Array {
   if (sigma <= 0) return src.slice();
   const k = gaussianKernel(sigma);
   const r = (k.length - 1) / 2;
@@ -33,7 +37,7 @@ export function gaussianFilter2D(src: Float32Array, H: number, W: number, sigma:
       let acc = 0;
       for (let t = -r; t <= r; t++) {
         let xx = x + t;
-        if (wrap) { xx = ((xx % W) + W) % W; } else { if (xx < 0) xx = 0; else if (xx >= W) xx = W - 1; }
+        if (wrapX) { xx = ((xx % W) + W) % W; } else { if (xx < 0) xx = 0; else if (xx >= W) xx = W - 1; }
         acc += src[row + xx] * k[t + r];
       }
       tmp[row + x] = acc;
@@ -45,7 +49,7 @@ export function gaussianFilter2D(src: Float32Array, H: number, W: number, sigma:
       let acc = 0;
       for (let t = -r; t <= r; t++) {
         let yy = y + t;
-        if (wrap) { yy = ((yy % H) + H) % H; } else { if (yy < 0) yy = 0; else if (yy >= H) yy = H - 1; }
+        if (wrapY) { yy = ((yy % H) + H) % H; } else { if (yy < 0) yy = 0; else if (yy >= H) yy = H - 1; }
         acc += tmp[yy * W + x];
       }
       out[y * W + x] = acc;
@@ -65,15 +69,15 @@ export interface Affine { arx: number; ary: number; r0: number; acx: number; acy
 
 /**
  * Sample HxW source onto a ny x nx grid using a full affine. order 1 = bilinear, 0 = nearest.
- * wrap = periodic else clamp.
+ * wrapX/wrapY = periodic along cols (u) / rows (v) else clamp.
  */
 function affineResample(
   src: Float32Array, H: number, W: number, A: Affine,
-  ny: number, nx: number, order: 0 | 1, wrap: boolean,
+  ny: number, nx: number, order: 0 | 1, wrapX: boolean, wrapY: boolean,
 ): Float32Array {
   const out = new Float32Array(ny * nx);
-  const cy = (v: number) => { if (wrap) return ((v % H) + H) % H; return v < 0 ? 0 : v >= H ? H - 1 : v; };
-  const cx = (v: number) => { if (wrap) return ((v % W) + W) % W; return v < 0 ? 0 : v >= W ? W - 1 : v; };
+  const cy = (v: number) => { if (wrapY) return ((v % H) + H) % H; return v < 0 ? 0 : v >= H ? H - 1 : v; };
+  const cx = (v: number) => { if (wrapX) return ((v % W) + W) % W; return v < 0 ? 0 : v >= W ? W - 1 : v; };
   for (let gy = 0; gy < ny; gy++) {
     const rowBaseR = A.ary * gy + A.r0;
     const rowBaseC = A.acy * gy + A.c0;
@@ -105,7 +109,7 @@ function affineResample(
 export function resample(
   labels: Int32Array, H: number, W: number, ncolors: number,
   ny: number, nx: number, affine: Affine,
-  sigma: number, wrap: boolean,
+  sigma: number, wrapX: boolean, wrapY: boolean,
 ): Int32Array {
   const best = new Float32Array(ny * nx).fill(-Infinity);
   const out = new Int32Array(ny * nx).fill(-1);
@@ -114,8 +118,8 @@ export function resample(
     let present = false;
     for (let i = 0; i < H * W; i++) { const m = labels[i] === k ? 1 : 0; mask[i] = m; if (m) present = true; }
     if (!present) continue;
-    const blurred = sigma > 0 ? gaussianFilter2D(mask, H, W, sigma, wrap) : mask;
-    const val = affineResample(blurred, H, W, affine, ny, nx, sigma > 0 ? 1 : 0, wrap);
+    const blurred = sigma > 0 ? gaussianFilter2D(mask, H, W, sigma, wrapX, wrapY) : mask;
+    const val = affineResample(blurred, H, W, affine, ny, nx, sigma > 0 ? 1 : 0, wrapX, wrapY);
     for (let i = 0; i < ny * nx; i++) {
       if (val[i] > best[i]) { best[i] = val[i]; out[i] = k; }
     }
@@ -192,15 +196,15 @@ function diskParams(radius: number): { r: number; r2: number } {
   return { r, r2: r * r + r * 0.5 };
 }
 
-function padLabels(grid: Int32Array, ny: number, nx: number, pad: number, wrap: boolean): { p: Int32Array; pw: number; ph: number } {
+function padLabels(grid: Int32Array, ny: number, nx: number, pad: number, wrapX: boolean, wrapY: boolean): { p: Int32Array; pw: number; ph: number } {
   const pw = nx + 2 * pad, ph = ny + 2 * pad;
   const p = new Int32Array(ph * pw);
   for (let y = 0; y < ph; y++) {
     let sy = y - pad;
-    if (wrap) sy = ((sy % ny) + ny) % ny; else sy = sy < 0 ? 0 : sy >= ny ? ny - 1 : sy;
+    if (wrapY) sy = ((sy % ny) + ny) % ny; else sy = sy < 0 ? 0 : sy >= ny ? ny - 1 : sy;
     for (let x = 0; x < pw; x++) {
       let sx = x - pad;
-      if (wrap) sx = ((sx % nx) + nx) % nx; else sx = sx < 0 ? 0 : sx >= nx ? nx - 1 : sx;
+      if (wrapX) sx = ((sx % nx) + nx) % nx; else sx = sx < 0 ? 0 : sx >= nx ? nx - 1 : sx;
       p[y * pw + x] = grid[sy * nx + sx];
     }
   }
@@ -210,12 +214,13 @@ function padLabels(grid: Int32Array, ny: number, nx: number, pad: number, wrap: 
 /**
  * Remove features narrower than ~2*radius (a morphological opening per color). Removed cells take
  * the label of the nearest surviving cell (so the grid stays a full partition). Ports `despeckle`.
+ * wrapX/wrapY pad periodically along that axis (cylindrical wraps in u only).
  */
-export function despeckle(grid: Int32Array, ny: number, nx: number, radiusPx: number, wrap: boolean): Int32Array {
+export function despeckle(grid: Int32Array, ny: number, nx: number, radiusPx: number, wrapX: boolean, wrapY: boolean): Int32Array {
   if (radiusPx < 0.75) return grid;
   const { r, r2 } = diskParams(radiusPx);
   const pad = 2 * r + 1;
-  const { p, pw, ph } = padLabels(grid, ny, nx, pad, wrap);
+  const { p, pw, ph } = padLabels(grid, ny, nx, pad, wrapX, wrapY);
   const N = ph * pw;
 
   // unique labels in the original grid

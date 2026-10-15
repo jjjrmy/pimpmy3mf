@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { Axis, Params, Result } from '../core/types';
+import type { Axis, Params, Projection, Result } from '../core/types';
 import { Slider } from './Slider';
 
 /** What the UI knows about a loaded model: its name, size and object/part structure. */
@@ -21,11 +21,22 @@ interface DesignTabProps {
   lockAspect: boolean;
   onLockAspect: (v: boolean) => void;
   result: Result | null;
+  /** Current palette colors ('#RRGGBB'), filament order — for the painted-face chips. */
+  hexes: string[];
+  onRemoveFace: (id: string) => void;
+  onClearFaces: () => void;
 }
 
+/** Planar: projection direction. */
 const AXES: { value: Axis; label: string }[] = [
   { value: 'z', label: 'Top-down (z)' },
   { value: 'y', label: 'Front (y)' },
+  { value: 'x', label: 'Side (x)' },
+];
+/** Cylindrical: the cylinder axis the image wraps around. */
+const CYL_AXES: { value: Axis; label: string }[] = [
+  { value: 'z', label: 'Vertical (z)' },
+  { value: 'y', label: 'Front–back (y)' },
   { value: 'x', label: 'Side (x)' },
 ];
 
@@ -77,10 +88,64 @@ function PartsList({ model, hidden, onToggle }: { model: ModelSummary; hidden: S
   );
 }
 
+/** Painted faces (paint-face tool): a color chip, label, area and remove ✕, plus Clear all. */
+function PaintedFaces(props: DesignTabProps) {
+  const { params, model, hexes, onRemoveFace, onClearFaces } = props;
+  const faces = params.paintedFaces;
+  const n = hexes.length;
+  const totalParts = model ? model.objects.reduce((c, o) => c + o.parts.length, 0) : 0;
+  const multiPart = totalParts > 1;
+  return (
+    <section className="control-group">
+      <h3 className="tab-subhead">Painted faces</h3>
+      {faces.length === 0 ? (
+        <p className="hint">Use Paint face in the 3D view to print a face in one color.</p>
+      ) : (
+        <>
+          <ul className="face-list">
+            {faces.map((f, i) => {
+              const ci = Math.min(Math.max(f.color, 0), Math.max(0, n - 1));
+              const partName = multiPart ? model?.objects[f.objectIndex]?.parts[f.partIndex] : undefined;
+              return (
+                <li key={f.id} className="face-row">
+                  <span className="face-chip" style={{ background: hexes[ci] ?? '#cccccc' }} aria-hidden />
+                  <span className="face-label">
+                    Face {i + 1}
+                    {partName && <span className="face-part" title={partName}> · {partName}</span>}
+                  </span>
+                  <span className="face-area">{f.area.toFixed(1)} mm²</span>
+                  <button type="button" className="icon-x" aria-label={`Remove face ${i + 1}`} title="Remove" onClick={() => onRemoveFace(f.id)}>
+                    ✕
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <button type="button" className="btn-ghost" onClick={onClearFaces}>
+            Clear all
+          </button>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function DesignTab(props: DesignTabProps) {
   const { params, onParams, mode, model, result } = props;
   const [tileWidth, setTileWidth] = useState<number>(params.width ?? 60);
   const repeat = mode === 'paint' && params.width != null;
+
+  // remember the axis per projection (planar defaults to y, cylindrical to z)
+  const axisMemo = useRef<Record<Projection, Axis>>({ planar: 'y', cylindrical: 'z' });
+  const onProjection = (projection: Projection) => {
+    if (projection === params.projection) return;
+    axisMemo.current[params.projection] = params.axis; // keep what we're leaving
+    onParams({ projection, axis: axisMemo.current[projection] });
+  };
+  const onAxis = (axis: Axis) => {
+    axisMemo.current[params.projection] = axis;
+    onParams({ axis });
+  };
 
   const widthValue = params.width ?? 100;
   const heightValue = params.height ?? (result ? Number(result.tile.h.toFixed(2)) : Math.round(widthValue * 0.75));
@@ -89,6 +154,8 @@ export function DesignTab(props: DesignTabProps) {
   const offsetRange = Math.ceil(Math.max(frameSpan, Math.abs(params.offsetX), Math.abs(params.offsetY), 10));
 
   const parts = model ? model.objects.reduce((n, o) => n + o.parts.length, 0) : 0;
+  const cylindrical = params.projection === 'cylindrical';
+  const axisOptions = cylindrical ? CYL_AXES : AXES;
 
   return (
     <div className="tab-body">
@@ -97,6 +164,30 @@ export function DesignTab(props: DesignTabProps) {
         <section className="control-group">
           <h3 className="tab-subhead">Parts</h3>
           <PartsList model={model} hidden={props.hiddenParts} onToggle={props.onTogglePart} />
+        </section>
+      )}
+
+      {/* ---- projection (paint mode) ---- */}
+      {mode === 'paint' && model && (
+        <section className="control-group">
+          <h3 className="tab-subhead">Projection</h3>
+          <div className="segmented segmented-sm">
+            <button type="button" className={cylindrical ? '' : 'is-active'} onClick={() => onProjection('planar')}>
+              Planar
+            </button>
+            <button type="button" className={cylindrical ? 'is-active' : ''} onClick={() => onProjection('cylindrical')}>
+              Cylindrical
+            </button>
+          </div>
+          <Field label={cylindrical ? 'Cylinder axis' : 'Projection axis'}>
+            <select value={params.axis} onChange={(e) => onAxis(e.target.value as Axis)}>
+              {axisOptions.map((a) => (
+                <option key={a.value} value={a.value}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </Field>
         </section>
       )}
 
@@ -133,18 +224,25 @@ export function DesignTab(props: DesignTabProps) {
             <span>Repeat pattern (tile)</span>
           </label>
           {repeat ? (
-            <Slider
-              label="Tile width"
-              unit="mm"
-              min={5}
-              max={300}
-              step={1}
-              value={params.width ?? tileWidth}
-              onChange={(v) => {
-                setTileWidth(v);
-                onParams({ width: v });
-              }}
-            />
+            <>
+              <Slider
+                label="Tile width"
+                unit="mm"
+                min={5}
+                max={300}
+                step={1}
+                value={params.width ?? tileWidth}
+                onChange={(v) => {
+                  setTileWidth(v);
+                  onParams({ width: v });
+                }}
+              />
+              {cylindrical && result?.tile.wraps != null && (
+                <p className="hint">
+                  Snapped to {result.tile.w.toFixed(1)} mm · {result.tile.wraps} around
+                </p>
+              )}
+            </>
           ) : (
             <p className="hint">Stretching one copy of the image to cover the model.</p>
           )}
@@ -157,17 +255,6 @@ export function DesignTab(props: DesignTabProps) {
         <Slider label="Rotation" unit="°" min={-180} max={180} step={1} value={params.rotation} onChange={(v) => onParams({ rotation: v })} />
         <Slider label="Offset X" unit="mm" min={-offsetRange} max={offsetRange} step={0.5} value={params.offsetX} onChange={(v) => onParams({ offsetX: v })} />
         <Slider label="Offset Y" unit="mm" min={-offsetRange} max={offsetRange} step={0.5} value={params.offsetY} onChange={(v) => onParams({ offsetY: v })} />
-        {mode === 'paint' && model && (
-          <Field label="Projection axis">
-            <select value={params.axis} onChange={(e) => onParams({ axis: e.target.value as Axis })}>
-              {AXES.map((a) => (
-                <option key={a.value} value={a.value}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-        )}
         <button
           type="button"
           className="btn-ghost pattern-reset"
@@ -177,6 +264,9 @@ export function DesignTab(props: DesignTabProps) {
           Reset pattern
         </button>
       </section>
+
+      {/* ---- painted faces (paint mode) ---- */}
+      {mode === 'paint' && model && <PaintedFaces {...props} />}
 
       {/* ---- advanced ---- */}
       <details className="advanced">

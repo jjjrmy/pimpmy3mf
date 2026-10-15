@@ -309,7 +309,8 @@ function perPartResult(sideBySide: boolean): Result {
   });
   return {
     mode: 'paint', model,
-    frame: { x0: 0, y0: 0, x1: 1, y1: 1 }, tile: { w: 1, h: 1, repeat: false }, axis: 'z',
+    frame: { x0: 0, y0: 0, x1: 1, y1: 1 }, tile: { w: 1, h: 1, repeat: false, wraps: null }, axis: 'z',
+    projection: 'planar', cylinder: null, orientation: null, faceSkins: [],
     stats: { imageW: 1, imageH: 1, gridW: 1, gridH: 1, pitch: 1, ms: 0 }, warnings: [],
     regions: [
       mkRegion(0, '#866B6B', [null, null, null]),
@@ -383,7 +384,8 @@ async function main() {
       partMeshes: (Mesh | null)[][] | null = null): ColorRegion => ({
       index, rgb: [0, 0, 0], hex, coverage: 1, rings: [], mesh: mk(), objectMeshes, partMeshes,
     });
-    const base = { frame: { x0: 0, y0: 0, x1: 10, y1: 10 }, tile: { w: 10, h: 10, repeat: false }, axis: 'z' as const,
+    const base = { frame: { x0: 0, y0: 0, x1: 10, y1: 10 }, tile: { w: 10, h: 10, repeat: false, wraps: null }, axis: 'z' as const,
+      projection: 'planar' as const, cylinder: null, orientation: null, faceSkins: [],
       stats: { imageW: 1, imageH: 1, gridW: 1, gridH: 1, pitch: 1, ms: 0 }, warnings: [] };
 
     const imgRes: Result = { ...base, mode: 'image', regions: [region(0, '#111111'), region(1, '#222222')], model: null };

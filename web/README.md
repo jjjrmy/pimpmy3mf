@@ -31,6 +31,13 @@ Both use the same algorithm.
   - **Per-part modifiers** (checkbox, shown for multi-part models): every part becomes its own object
     with its own cropped modifiers, so each part can go on its own plate in any orientation. The camo
     stays exactly where it was in the assembled pose, so the seams line up after assembly.
+  - **Cylindrical projection:** wrap the pattern around the model as a tube instead of projecting it
+    flat. The image width wraps once around the axis and each color becomes a radial wedge. Also in
+    the CLI (`--projection cylindrical`).
+  - **Lay on face** (web-only): click a face to lay the model flat on it before projecting. Undo and
+    Reset orientation bring it back.
+  - **Paint face** (web-only): pick a palette color, then click or drag across faces. Painted faces
+    print solid in that color, ~1 mm deep, instead of the camo. The eraser removes them.
 - **UI:** "The 3MF Pimper", styled after the MTV *Pimp My Ride* Flash game.
   - Drag an image or a model anywhere on the page. Loading a model switches to paint mode.
   - The TEXTURE / DESIGN / COLORS tabs hold the controls.

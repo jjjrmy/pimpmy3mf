@@ -22,8 +22,10 @@ export interface ExtrudeResult {
 
 type Ring = { x: Float64Array; y: Float64Array };
 
-/** getMesh + map the (u,v,w) vertices back to xyz via R (row-major 3x3) or identity. */
-function meshFromManifold(man: ManifoldT, R?: number[] | null): Mesh {
+/** getMesh + map the (u,v,w) vertices back to xyz via R (row-major 3x3) or identity.
+ *  Exported so the cylindrical path (cylindrical.ts) reuses the same conversion (R = null: the
+ *  warped manifold is already in xyz). */
+export function meshFromManifold(man: ManifoldT, R?: number[] | null): Mesh {
   const gm = man.getMesh();
   const np = gm.numProp;
   const nv = gm.vertProperties.length / np;
@@ -45,8 +47,10 @@ function meshFromManifold(man: ManifoldT, R?: number[] | null): Mesh {
   return { vertices, triangles: new Uint32Array(gm.triVerts) };
 }
 
-/** Intersect the prism with one uvw box and return the cropped mesh (mapped to xyz by R), or null. */
-function cropToBox(man: ManifoldT, b: CropBox, R: number[] | null | undefined, Manifold: ManifoldToplevel['Manifold']): Mesh | null {
+/** Intersect the prism with one box and return the cropped mesh (mapped to xyz by R), or null.
+ *  Exported for the cylindrical path, which passes an xyz box and R = null (the manifold is already
+ *  in xyz). */
+export function cropToBox(man: ManifoldT, b: CropBox, R: number[] | null | undefined, Manifold: ManifoldToplevel['Manifold']): Mesh | null {
   const dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
   if (dx <= 0 || dy <= 0 || dz <= 0) return null;
   const cube = Manifold.cube([dx, dy, dz], false).translate([b.min[0], b.min[1], b.min[2]]);

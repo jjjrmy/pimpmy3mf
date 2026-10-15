@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Params, Result, RGB } from './core/types';
 import { DEFAULT_PARAMS } from './core/types';
+import { IDENTITY3, mulMat3, rotationToDown } from './core/faces';
 import { PRINTERS } from './core/threemf';
 import { CancelledError, PipelineClient } from './worker/client';
 import type { ExportKind } from './worker/messages';
@@ -12,7 +13,8 @@ import { ColorsTab } from './ui/ColorsTab';
 import { ActionBar } from './ui/ActionBar';
 import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
-import { Viewer3D } from './ui/Viewer3D';
+import { Viewer3D, type FacePick } from './ui/Viewer3D';
+import { ViewportTools, type ViewportTool } from './ui/ViewportTools';
 import { Legend, StatusLine } from './ui/Legend';
 import { useToast } from './ui/Toast';
 import { hexToRgb } from './ui/colorMap';
@@ -44,9 +46,18 @@ function friendlyStage(stage: string | null): string {
       return 'Tracing outlines…';
     case 'extrude':
       return 'Building 3D…';
+    case 'paint':
+      return 'Painting faces…';
     default:
       return 'Working…';
   }
+}
+
+/** Stable id for a painted face (survives re-orientation and setting changes). */
+function faceId(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 interface ImageState {
@@ -112,6 +123,13 @@ export default function App() {
   const [showModifiers, setShowModifiers] = useState(false);
   const [lockAspect, setLockAspect] = useState(true);
 
+  // ---- paint tools (lay-on-face / paint-face) ------------------------------------------------
+  const [activeTool, setActiveTool] = useState<ViewportTool | null>(null);
+  /** Undo stack of prior orientations (each entry = the pose before one lay-on-face). */
+  const [orientHistory, setOrientHistory] = useState<(number[] | null)[]>([]);
+  /** Paint-face brush: the palette index to paint with, or null = eraser. Default: index 1 (0 when N=1). */
+  const [brush, setBrush] = useState<number | null>(1);
+
   // whole-page drag-and-drop overlay (depth counter keeps it from flickering on child elements)
   const [dragging, setDragging] = useState(false);
 
@@ -140,6 +158,77 @@ export default function App() {
     setPicks([]);
     setHidden(new Set());
   }, [paletteMode, params.colors, customPalette]);
+
+  // a model load / clear starts the paint tools fresh: drop the orientation and painted faces
+  useEffect(() => {
+    setActiveTool(null);
+    setOrientHistory([]);
+    patchParams({ orientation: null, paintedFaces: [] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelToken]);
+
+  // Esc exits the active tool (the paint popover eats Esc first while it is open)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveTool(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // ---- paint-tool handlers -------------------------------------------------------------------
+  // Lay-on-face: rotate the whole model so the picked face points down, composed from the DISPLAYED
+  // pose (result.orientation) so a click mid-rerun still composes correctly.
+  const onLayPick = (pick: FacePick) => {
+    const res = result;
+    if (!res) return;
+    const newO = mulMat3(rotationToDown(pick.normal), res.orientation ?? IDENTITY3);
+    setOrientHistory((h) => [...h, params.orientation]);
+    patchParams({ orientation: newO });
+    setActiveTool(null); // exiting the tool after a successful lay is fine
+  };
+  const onUndoOrient = () => {
+    if (!orientHistory.length) return;
+    const prev = orientHistory[orientHistory.length - 1];
+    setOrientHistory(orientHistory.slice(0, -1));
+    patchParams({ orientation: prev });
+  };
+  const onResetOrient = () => {
+    setOrientHistory([]);
+    patchParams({ orientation: null });
+  };
+
+  // Commit a whole brush stroke in one update: one paintedFaces change -> one debounced pipeline run +
+  // one overlay rebuild. `color` is the brush palette index, or null to erase. Regions arrive deduped
+  // (one per planar region) from the viewport; here we dedupe against existing faces by seed triangle.
+  const onPaintStroke = (regions: FacePick[], color: number | null) => {
+    if (!regions.length) return;
+    setParams((p) => {
+      const faces = p.paintedFaces.slice();
+      for (const r of regions) {
+        const idx = faces.findIndex(
+          (f) => f.objectIndex === r.objectIndex && f.partIndex === r.partIndex && f.triangles.includes(r.seedTri),
+        );
+        if (color === null) {
+          if (idx >= 0) faces.splice(idx, 1); // erase
+        } else if (idx >= 0) {
+          faces[idx] = { ...faces[idx], color }; // recolor an already-painted region
+        } else {
+          faces.push({
+            id: faceId(),
+            objectIndex: r.objectIndex,
+            partIndex: r.partIndex,
+            triangles: r.triangles,
+            color,
+            area: r.area,
+          });
+        }
+      }
+      return { ...p, paintedFaces: faces };
+    });
+  };
+  const onRemoveFace = (id: string) => patchParams({ paintedFaces: params.paintedFaces.filter((f) => f.id !== id) });
+  const onClearFaces = () => patchParams({ paintedFaces: [] });
 
   // ---- filament suggestions (filamentcolors.xyz + SpoolmanDB) --------------------------------
   const filaments = useFilaments();
@@ -368,6 +457,12 @@ export default function App() {
 
   // ---- derived -------------------------------------------------------------------------------
   const hexes = useMemo(() => (result ? result.regions.map((r, i) => overrides[i] ?? r.hex) : []), [result, overrides]);
+  // keep the paint brush within the current palette (a shrink clamps it; the eraser stays null)
+  useEffect(() => {
+    const n = hexes.length;
+    if (n === 0) return;
+    setBrush((b) => (b === null ? null : Math.min(b, n - 1)));
+  }, [hexes.length]);
   const bed = useMemo<[number, number]>(() => {
     const p = PRINTERS.find((pr) => pr.id === printerId) ?? PRINTERS[0];
     return p.bed;
@@ -553,6 +648,9 @@ export default function App() {
                     if (v) patchParams({ height: null });
                   }}
                   result={result}
+                  hexes={hexes}
+                  onRemoveFace={onRemoveFace}
+                  onClearFaces={onClearFaces}
                 />
               </div>
               <div role="tabpanel" id="panel-colors" aria-labelledby="tab-colors" hidden={tab !== 'colors'}>
@@ -581,8 +679,28 @@ export default function App() {
                   bed={bed}
                   fitKey={fitKey}
                   active={true}
+                  activeTool={mode === 'paint' && hasResult ? activeTool : null}
+                  paintedFaces={params.paintedFaces}
+                  modelToken={modelToken}
+                  brush={brush}
+                  onLayPick={onLayPick}
+                  onPaintStroke={onPaintStroke}
                 />
               </div>
+
+              {mode === 'paint' && hasResult && (
+                <ViewportTools
+                  activeTool={activeTool}
+                  onToolChange={setActiveTool}
+                  hasOrientation={params.orientation != null}
+                  canUndo={orientHistory.length > 0}
+                  onUndo={onUndoOrient}
+                  onReset={onResetOrient}
+                  colors={hexes}
+                  brush={brush}
+                  onBrush={setBrush}
+                />
+              )}
 
               {mode === 'paint' && hasResult && (
                 <label className="viewport-prisms toggle toggle-inline">

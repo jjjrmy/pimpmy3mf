@@ -26,6 +26,13 @@ modifiers cropped to that part's bounding box. The texture stays exactly where i
 assembled pose - same frame, projection, rotation, offset and tile; only the crop box changes - so
 you can print each part separately in any orientation and the camo still lines up once reassembled.
 
+--projection cylindrical (paint mode) wraps the pattern around the model as a tube instead of
+projecting it flat. The cylinder axis is --axis through the model's center (default z). The image
+width wraps once around (u = R0 * angle, R0 = the model's largest radius about the axis); the height
+runs along the axis and repeats if it is shorter than the model. Each color becomes a radial wedge.
+--size tiles the pattern N times around; --rotate / --offset still apply, and --offset X turns the
+pattern around the axis.
+
 --rotate DEG turns the pattern counterclockwise (as seen in the preview) about the center of the
 covered area, then --offset X,Y shifts it in mm (+X right, +Y up). A turned or shifted pattern
 repeats past the image edges, so nothing is left uncovered; without --size, --apply-to also scales
@@ -38,6 +45,7 @@ Examples:
   img2color camo.png --colors=3 --apply-to part.stl --size=60  # paint part.stl, texture tiled every 60 mm
   img2color camo.png --colors=3 --rotate=30 --offset=10,-5     # turn the pattern 30°, shift it 10 mm right, 5 mm down
   img2color camo.png --colors=3 --apply-to assembly.3mf --per-part  # one object per part, texture stays aligned
+  img2color camo.png --colors=3 --apply-to can.stl --projection cylindrical  # wrap the pattern around the model
 """
 import argparse
 import glob
@@ -194,12 +202,18 @@ def resample(labels, ncolors, shape, matrix, offset, sigma, wrap):
 
 def despeckle(grid, radius_px, wrap):
     """Remove features narrower than ~2*radius (an opening per color). Removed cells are given the
-    color of the nearest surviving cell, so the result is still a full partition."""
+    color of the nearest surviving cell, so the result is still a full partition.
+    wrap: True = both axes periodic (planar tile), "u" = columns only (cylindrical seam, not the
+    open axial ends), False = no wrap."""
     if radius_px < 0.75:
         return grid
     se = disk(radius_px)
     pad = se.shape[0]
-    padded = np.pad(grid, pad, mode="wrap" if wrap else "edge")
+    if wrap == "u":
+        padded = np.pad(np.pad(grid, ((0, 0), (pad, pad)), mode="wrap"),
+                        ((pad, pad), (0, 0)), mode="edge")
+    else:
+        padded = np.pad(grid, pad, mode="wrap" if wrap else "edge")
     keep = np.zeros(padded.shape, bool)
     for k in np.unique(grid):
         keep |= ndimage.binary_opening(padded == k, structure=se)
@@ -346,6 +360,56 @@ def extrude(polys, height, z0=0.0):
     v = np.asarray(mesh.vert_properties, dtype=np.float64)[:, :3]
     t = np.asarray(mesh.tri_verts, dtype=np.int64)
     return v, t
+
+
+# Cylinder frame per --axis: angle phi runs e1 -> e2 (right-handed, e1 x e2 = a), axis a.
+CYL_BASIS = {
+    "z": (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])),
+    "y": (np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])),
+    "x": (np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])),
+}
+
+
+def extrude_cyl(polys, cyl, r_lo, r_hi):
+    """Polygons in (u, v) -> a radial-wedge Manifold wrapped onto the cylinder, in xyz.
+    Each polygon fills the slab r in [r_lo, r_hi] over its (phi = u / R0, v) footprint:
+      (u, v, r) -> center + r*cos(u/R0)*e1 + r*sin(u/R0)*e2 + v*a
+    The ring edges are densified so adjacent colors split their shared border identically (matched
+    facets that cannot cross after warping); then the extruded caps are refined so the warped arcs
+    stay smooth (chord error <= 0.05 mm at r_hi), while the radial walls keep a single span - no
+    needless triangles. Because the ring step (L/2) and slab stay below the refine length, refine
+    touches only the caps, never the matched walls. The same 0.5 um inset as extrude() keeps colors
+    from overlapping, across the 0/360 seam too. Returns a Manifold, or None if nothing is left."""
+    center, e1, e2, a, R0 = cyl
+    L = R0 * 2.0 * math.acos(max(-1.0, 1.0 - 0.05 / r_hi))    # longest u step within the chord error
+    L = max(L, 1e-3)
+    seg = 0.5 * L                                            # matched, finer-than-caps wall densify
+    arr = shapely.segmentize(np.array(list(polys), dtype=object), seg) if len(polys) else []
+    rings = []
+    for p in arr:
+        for g in shapely.get_parts(p):
+            if g.is_empty:
+                continue
+            rings.append(np.asarray(g.exterior.coords)[:-1])
+            rings.extend(np.asarray(h.coords)[:-1] for h in g.interiors)
+    rings = [r for r in rings if len(r) >= 3]
+    if not rings:
+        return None
+    cs = m3d.CrossSection(rings, m3d.FillRule.EvenOdd).offset(-0.0005, m3d.JoinType.Miter, 4.0)
+    if cs.is_empty() or cs.area() <= 0:
+        return None
+    slab = 0.5 * L                                           # wall diagonals < L, so only caps refine
+    man = m3d.Manifold.extrude(cs, slab).refine_to_length(L)
+
+    def warp(p):
+        u, v, z = p[:, 0], p[:, 1], p[:, 2]
+        r = r_lo + (z / slab) * (r_hi - r_lo)
+        phi = u / R0
+        return (center[None, :] + (r * np.cos(phi))[:, None] * e1[None, :]
+                + (r * np.sin(phi))[:, None] * e2[None, :] + v[:, None] * a[None, :])
+
+    man = man.warp_batch(warp)
+    return man if not man.is_empty() else None
 
 
 def weld(tris):
@@ -889,8 +953,12 @@ def main():
     ap.add_argument("--offset", default="0,0", metavar="X,Y",
                     help="shift the pattern by X,Y mm after rotating (+X right, +Y up in the preview)")
     ap.add_argument("-a", "--apply-to", metavar="MODEL", help="paint this model (.stl/.3mf/.obj) with the colors")
-    ap.add_argument("--axis", choices=["z", "y", "x"], default="y",
-                    help="--apply-to projection direction: y = front (default), z = top-down, x = side")
+    ap.add_argument("--projection", choices=["planar", "cylindrical"], default="planar",
+                    help="--apply-to only: planar = flat projection (default); cylindrical = wrap the "
+                    "pattern around the --axis as a tube (u = R0*angle, v = along the axis)")
+    ap.add_argument("--axis", choices=["z", "y", "x"], default=None,
+                    help="--apply-to axis: y = front, z = top-down, x = side (planar projection direction), "
+                    "or the cylinder axis (cylindrical). Default y for planar, z for cylindrical")
     ap.add_argument("--per-part", action="store_true",
                     help="--apply-to only: make each input part its own object with its own modifiers "
                     "cropped to that part (the shared texture stays put), so parts print separately")
@@ -902,6 +970,10 @@ def main():
     ap.add_argument("--plate", default="Textured PEI Plate",
                     help='Bambu bed plate (default "Textured PEI Plate"; e.g. "Cool Plate", "High Temp Plate")')
     args = ap.parse_args()
+    if args.projection == "cylindrical" and not args.apply_to:
+        ap.error("--projection cylindrical needs --apply-to (it wraps the pattern around a model)")
+    if args.axis is None:
+        args.axis = "z" if args.projection == "cylindrical" else "y"
 
     t_start = time.time()
     src = Path(args.image).expanduser()
@@ -935,28 +1007,60 @@ def main():
         if not mpath.is_file():
             raise SystemExit(f"model not found: {mpath}")
         mobjs = load_mesh(mpath)
-        # (u, v, w) = image right, image up, projection depth; R maps uvw -> xyz (det +1)
-        R = {"z": np.eye(3),
-             "y": np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], float),
-             "x": np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], float)}[args.axis]
-        uvw = np.concatenate([p["v"] for o in mobjs for p in o["parts"]]) @ R   # xyz -> uvw (R^-1 = R^T)
-        lo, hi = uvw.min(0), uvw.max(0)
+        verts = np.concatenate([p["v"] for o in mobjs for p in o["parts"]])
         margin = 1.0
-        bx0, by0, bx1, by1 = lo[0] - margin, lo[1] - margin, hi[0] + margin, hi[1] + margin
-        if args.size:
-            tw, th = parse_size(args.size)
-            th = th or tw * H / W
-            tile = True
-            ox, oy = bx0, by1      # tile origin: top-left of the region
+        if args.projection == "cylindrical":
+            # Wrap the pattern around the cylinder axis a through the bbox center. phi runs e1 -> e2;
+            # u = R0 * phi wraps once in [0, 2*pi*R0]; v is the axial coordinate.
+            e1, e2, a = CYL_BASIS[args.axis]
+            center = (verts.min(0) + verts.max(0)) / 2
+            rel = verts - center
+            R0 = float(np.hypot(rel @ e1, rel @ e2).max())
+            if R0 <= 0:
+                raise SystemExit("--projection cylindrical: the model has no radius about that axis")
+            vax = rel @ a
+            vmin, vmax = float(vax.min()), float(vax.max())
+            circ = 2 * math.pi * R0
+            bx0, by0, bx1, by1 = 0.0, vmin - margin, circ, vmax + margin
+            if args.size:
+                wsz, hsz = parse_size(args.size)
+                n = max(1, round(circ / wsz))
+                tw = circ / n                              # an exact number of wraps around
+                th = hsz or tw * H / W
+                tile = True
+                ox, oy = bx0, by1
+                if abs(tw - wsz) > 1e-6:
+                    log(f"note: tile width snapped {wsz:.1f} -> {tw:.2f} mm ({n} around)")
+            else:
+                tw = circ                                  # one wrap around the cylinder
+                th = tw * H / W
+                tile = False
+                ox, oy = (bx0 + bx1) / 2 - tw / 2, (by0 + by1) / 2 + th / 2
+            model = dict(path=mpath, objs=mobjs, proj="cylindrical", margin=margin,
+                         cyl=(center, e1, e2, a, R0), r_lo=max(1.0, 0.3 * R0), r_hi=R0 + 1.0)
         else:
-            # cover scale: big enough that the (rotated) image still covers the whole region
-            fw, fh = bx1 - bx0, by1 - by0
-            ac, as_ = abs(math.cos(rot)), abs(math.sin(rot))
-            s_cover = max((fw * ac + fh * as_) / W, (fw * as_ + fh * ac) / H)
-            tw, th = W * s_cover, H * s_cover
-            tile = False
-            ox, oy = (bx0 + bx1) / 2 - tw / 2, (by0 + by1) / 2 + th / 2
-        model = (mpath, mobjs, R, lo[2] - margin, hi[2] + margin, margin)
+            # (u, v, w) = image right, image up, projection depth; R maps uvw -> xyz (det +1)
+            R = {"z": np.eye(3),
+                 "y": np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], float),
+                 "x": np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], float)}[args.axis]
+            uvw = verts @ R   # xyz -> uvw (R^-1 = R^T)
+            lo, hi = uvw.min(0), uvw.max(0)
+            bx0, by0, bx1, by1 = lo[0] - margin, lo[1] - margin, hi[0] + margin, hi[1] + margin
+            if args.size:
+                tw, th = parse_size(args.size)
+                th = th or tw * H / W
+                tile = True
+                ox, oy = bx0, by1      # tile origin: top-left of the region
+            else:
+                # cover scale: big enough that the (rotated) image still covers the whole region
+                fw, fh = bx1 - bx0, by1 - by0
+                ac, as_ = abs(math.cos(rot)), abs(math.sin(rot))
+                s_cover = max((fw * ac + fh * as_) / W, (fw * as_ + fh * ac) / H)
+                tw, th = W * s_cover, H * s_cover
+                tile = False
+                ox, oy = (bx0 + bx1) / 2 - tw / 2, (by0 + by1) / 2 + th / 2
+            model = dict(path=mpath, objs=mobjs, proj="planar", margin=margin,
+                         R=R, w0=lo[2] - margin, w1=hi[2] + margin)
     else:
         tw, th = parse_size(args.size) if args.size else (100.0, None)
         th = th or tw * H / W
@@ -977,7 +1081,7 @@ def main():
     if args.out:
         out_dir = Path(args.out).expanduser()
     elif model is not None:
-        out_dir = src.parent / f"{safe(model[0].stem)}-{stem}-{ncol}colors"
+        out_dir = src.parent / f"{safe(model['path'].stem)}-{stem}-{ncol}colors"
     else:
         out_dir = src.parent / f"{stem}-{ncol}colors"
 
@@ -1008,9 +1112,12 @@ def main():
     sigma = args.smooth
     if sigma > 0:
         sigma = max(sigma, 0.5 * max(sx, sy))           # anti-alias when shrinking a big image
-    # a turned or shifted pattern repeats past the image edges, so nothing is left uncovered
-    grid = resample(labels, ncol, (ny, nx), matrix, [row0, col0], sigma, tile or transformed)
-    grid = despeckle(grid, (args.min_feature / 2) / min(qx, qy), tile)
+    # cylindrical sampling is always periodic (u wraps once around, v repeats); despeckle wraps only
+    # across the u seam, not the open axial ends. a turned or shifted planar pattern repeats too.
+    cylindrical = model is not None and model["proj"] == "cylindrical"
+    grid = resample(labels, ncol, (ny, nx), matrix, [row0, col0], sigma,
+                    True if cylindrical else (tile or transformed))
+    grid = despeckle(grid, (args.min_feature / 2) / min(qx, qy), "u" if cylindrical else tile)
     polys = trace(grid, args.smooth > 0)
 
     to_mm = lambda xy: np.column_stack([bx0 + xy[:, 0] * qx, by1 - xy[:, 1] * qy])
@@ -1037,34 +1144,83 @@ def main():
         objects.append(dict(name=f"{stem} ({ncol} colors)", parts=parts))
         out_3mf = out_dir / f"{stem}-{ncol}colors.3mf"
     else:
-        mpath, mobjs, R, w0, w1, margin = model
-        full = {}                       # color -> modifier prism through the whole model (xyz)
-        for k in range(ncol):
-            mesh = extrude(polys_mm.get(k, []), w1 - w0, w0)
-            fname = f"{stem}-{k + 1}-{hexes[k][1:]}-modifier.stl"
-            if mesh is None:
-                rows.append((k, None))
-                continue
-            full[k] = (mesh[0] @ R.T, mesh[1])                 # uvw -> xyz
-            write_stl(out_dir / fname, *full[k])
-            rows.append((k, fname))
+        mpath, mobjs, margin = model["path"], model["objs"], model["margin"]
+        full = {}                       # color -> whole-model modifier mesh (xyz)
+        if model["proj"] == "cylindrical":
+            cyl, r_lo, r_hi = model["cyl"], model["r_lo"], model["r_hi"]
+            man_full = {}               # color -> whole-model modifier Manifold (for crops)
+            # Build every color's warped wedge, then make them a true partition: the lower color
+            # index wins any overlap. The warp facets each color's shared border independently, so
+            # they can cross despite the 0.5 um inset; subtracting the already-claimed volume keeps
+            # the modifiers from ever sharing space (including across the 0/360 seam).
+            raw = {k: m for k in range(ncol)
+                   if (m := extrude_cyl(polys_mm.get(k, []), cyl, r_lo, r_hi)) is not None}
+            claimed = None
+            for k in range(ncol):
+                man = raw.get(k)
+                fname = f"{stem}-{k + 1}-{hexes[k][1:]}-modifier.stl"
+                if man is None:
+                    rows.append((k, None))
+                    continue
+                if claimed is not None:
+                    man = man - claimed
+                if man.is_empty() or man.num_tri() == 0:
+                    rows.append((k, None))
+                    continue
+                claimed = man if claimed is None else claimed + man
+                mesh = man.to_mesh()
+                full[k] = (np.asarray(mesh.vert_properties, np.float64)[:, :3],
+                           np.asarray(mesh.tri_verts, np.int64))
+                man_full[k] = man
+                write_stl(out_dir / fname, *full[k])
+                rows.append((k, fname))
 
-        def crop_mods(verts_xyz):
-            """Each color's modifier prism (k >= 1) cropped to the uvw bbox of verts_xyz (± margin).
-            The texture never moves - only the crop box changes - so cropped pieces stay registered
-            to the shared global pattern. Returns {k: (v_xyz, t)}."""
-            uvw = verts_xyz @ R
-            clo, chi = uvw.min(0) - margin, uvw.max(0) + margin
-            rect = shapely.box(clo[0], clo[1], chi[0], chi[1])
-            mods = {}
-            for k in range(1, ncol):
-                ps = polys_mm.get(k, [])
-                clipped = [g for g in shapely.get_parts(shapely.intersection(np.array(ps, dtype=object), rect))
-                           if g.geom_type == "Polygon" and not g.is_empty] if ps else []
-                mesh = extrude(clipped, chi[2] - clo[2], clo[2])
-                if mesh is not None:
-                    mods[k] = (mesh[0] @ R.T, mesh[1])
-            return mods
+            def crop_mods(verts_xyz):
+                """Each color's warped wedge (k >= 1) intersected with the xyz bbox of verts_xyz
+                (± margin). The wedge never moves - only the crop box changes - so cropped pieces
+                stay registered to the shared pattern. Returns {k: (v_xyz, t)}."""
+                lo, hi = verts_xyz.min(0) - margin, verts_xyz.max(0) + margin
+                box = m3d.Manifold.cube((hi - lo).tolist(), False).translate(lo.tolist())
+                mods = {}
+                for k in range(1, ncol):
+                    man = man_full.get(k)
+                    if man is None:
+                        continue
+                    clip = man ^ box
+                    if clip.is_empty() or clip.num_tri() == 0:
+                        continue
+                    cm = clip.to_mesh()
+                    mods[k] = (np.asarray(cm.vert_properties, np.float64)[:, :3],
+                               np.asarray(cm.tri_verts, np.int64))
+                return mods
+        else:
+            R, w0, w1 = model["R"], model["w0"], model["w1"]
+            for k in range(ncol):
+                mesh = extrude(polys_mm.get(k, []), w1 - w0, w0)
+                fname = f"{stem}-{k + 1}-{hexes[k][1:]}-modifier.stl"
+                if mesh is None:
+                    rows.append((k, None))
+                    continue
+                full[k] = (mesh[0] @ R.T, mesh[1])                 # uvw -> xyz
+                write_stl(out_dir / fname, *full[k])
+                rows.append((k, fname))
+
+            def crop_mods(verts_xyz):
+                """Each color's modifier prism (k >= 1) cropped to the uvw bbox of verts_xyz (± margin).
+                The texture never moves - only the crop box changes - so cropped pieces stay registered
+                to the shared global pattern. Returns {k: (v_xyz, t)}."""
+                uvw = verts_xyz @ R
+                clo, chi = uvw.min(0) - margin, uvw.max(0) + margin
+                rect = shapely.box(clo[0], clo[1], chi[0], chi[1])
+                mods = {}
+                for k in range(1, ncol):
+                    ps = polys_mm.get(k, [])
+                    clipped = [g for g in shapely.get_parts(shapely.intersection(np.array(ps, dtype=object), rect))
+                               if g.geom_type == "Polygon" and not g.is_empty] if ps else []
+                    mesh = extrude(clipped, chi[2] - clo[2], clo[2])
+                    if mesh is not None:
+                        mods[k] = (mesh[0] @ R.T, mesh[1])
+                return mods
 
         # Each input object (or, with --per-part, each input part) stays its own object with its
         # parts on filament 1. A Bambu modifier only colors the object it belongs to, so every
@@ -1107,11 +1263,13 @@ def main():
     prev = out_dir / f"{out_3mf.stem}-preview.png"
     sil = None
     if model is not None:
-        mparts = [p for o in model[1] for p in o["parts"]]
-        base = np.cumsum([0] + [len(p["v"]) for p in mparts])
-        sil = (np.concatenate([(p["v"] @ model[2])[:, :2] for p in mparts]),
-               np.concatenate([p["t"] + b for p, b in zip(mparts, base)]))
-        structure = (f"{len(model[1])} object{'s' * (len(model[1]) > 1)}, "
+        mobjs = model["objs"]
+        mparts = [p for o in mobjs for p in o["parts"]]
+        if model["proj"] == "planar":      # faded model silhouette under the flat projection
+            base = np.cumsum([0] + [len(p["v"]) for p in mparts])
+            sil = (np.concatenate([(p["v"] @ model["R"])[:, :2] for p in mparts]),
+                   np.concatenate([p["t"] + b for p, b in zip(mparts, base)]))
+        structure = (f"{len(mobjs)} object{'s' * (len(mobjs) > 1)}, "
                      f"{len(mparts)} part{'s' * (len(mparts) > 1)}")
         split = "each part its own object (--per-part)" if args.per_part else "kept separate"
     save_preview(prev, im, polys_mm, colors, (bx0, by0, bx1, by1), sil)
@@ -1119,16 +1277,20 @@ def main():
     with open(out_dir / "colors.txt", "w") as f:
         f.write(f"# img2color {src.name}  {ncol} colors\n")
         if model is not None:
-            f.write(f"# painted onto {model[0].name} ({structure}, {split}); filament 1 = the model, "
-                    f"others = modifiers (projection axis {args.axis})\n")
+            how = f"cylindrical, axis {args.axis}" if model["proj"] == "cylindrical" else f"projection axis {args.axis}"
+            f.write(f"# painted onto {model['path'].name} ({structure}, {split}); filament 1 = the model, "
+                    f"others = modifiers ({how})\n")
         f.write("filament  hex      coverage  file\n")
         for k, fname in rows:
             f.write(f"{k + 1:<9} {hexes[k]}  {100 * area.get(k, 0) / total:6.1f}%   {fname or '(none)'}\n")
 
     # ---- summary
+    cyl = model is not None and model["proj"] == "cylindrical"
     log(f"{src.name}: {W}x{H}px -> {ncol} colors, {tw:.1f} x {th:.1f} mm"
-        + (f" tile over {mpath.name}" if model is not None and tile else "")
-        + (f" stretched over {mpath.name}" if model is not None and not tile else "")
+        + (f" tiled around {mpath.name}" if cyl and tile else "")
+        + (f" wrapped around {mpath.name}" if cyl and not tile else "")
+        + (f" tile over {mpath.name}" if model is not None and not cyl and tile else "")
+        + (f" stretched over {mpath.name}" if model is not None and not cyl and not tile else "")
         + (f", rotated {args.rotate:g}°" if args.rotate else "")
         + (f", offset {dx:g},{dy:g} mm" if dx or dy else "")
         + f", grid {nx}x{ny} @ {qx:.3f} mm")

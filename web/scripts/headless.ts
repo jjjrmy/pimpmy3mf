@@ -54,6 +54,9 @@ function buildParams(a: Record<string, string>): Params {
     offsetX: num('offset-x', DEFAULT_PARAMS.offsetX),
     offsetY: num('offset-y', DEFAULT_PARAMS.offsetY),
     perPart: 'per-part' in a ? true : DEFAULT_PARAMS.perPart,
+    projection: (a.projection as Params['projection']) ?? DEFAULT_PARAMS.projection,
+    orientation: null,
+    paintedFaces: [],
   };
 }
 
@@ -134,6 +137,8 @@ async function main() {
     frame: result.frame,
     tile: result.tile,
     axis: result.axis,
+    projection: result.projection,
+    cylinder: result.cylinder,
     stats: result.stats,
     warnings: result.warnings,
     timings: { loadMs: +loadMs.toFixed(1), fullMs: +fullMs.toFixed(1), thicknessRerunMs: +reRunMs.toFixed(1) },

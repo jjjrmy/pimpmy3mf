@@ -46,8 +46,14 @@ img2color camo.png --colors=4 --size=150 --thickness=1.2
 img2color camo.png --palette="#1E1E1E,#8B3A3A,#9A9A9A"   # snap to the filaments you own
 img2color camo.png --colors=3 --apply-to part.3mf --size=60 --rotate=30 --offset=5,0
 img2color camo.png --colors=3 --apply-to part.3mf --axis=z  # project top-down instead of from the front (y)
+img2color camo.png --colors=3 --apply-to can.stl --projection cylindrical  # wrap the pattern around the model as a tube
 img2color camo.png --colors=3 --apply-to assembly.3mf --per-part  # one object per part, texture stays aligned
 ```
+
+**Cylindrical projection** (wrap the pattern around a model) works in both the web app and the CLI
+(`--projection cylindrical`). The web app also has two interactive tools that are web-only: **Lay on
+face** (click a face to lay the model flat on it) and **Paint face** (brush colors straight onto the
+model).
 
 Output goes next to the image in `<name>-<N>colors/`:
 - a Bambu Studio project `.3mf`, or a plain 3MF with `--no-bambu`;

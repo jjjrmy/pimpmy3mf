@@ -12,7 +12,7 @@
 // Geometry XML is emitted in chunks (never one giant JS string) so a ~1M-triangle model stays
 // within memory; the archive is zipped with fflate.
 import { zipSync } from 'fflate';
-import type { BambuProjectOptions, ExportObject, Mesh, Part, PrinterPreset, Result } from './types';
+import type { BambuProjectOptions, ExportObject, FaceSkin, Mesh, Part, PrinterPreset, Result } from './types';
 import { flushMatrix } from './bambu/flush';
 import { loadTemplate, type BambuTemplate } from './bambu/template';
 
@@ -375,6 +375,13 @@ const enc = new TextEncoder();
 export function objectsFromResult(result: Result, hexes: string[], imageName: string): ExportObject[] {
   const colorOf = (i: number, fallback = '#FFFFFF'): string => (hexes[i] ?? fallback).toUpperCase();
 
+  // A painted-face skin -> its modifier part (appended after the camo modifiers so it wins where they overlap).
+  // `si` is the skin's 1-based index in result.faceSkins, matching the STL filenames.
+  const skinPart = (s: FaceSkin, si: number): Part => {
+    const c = colorOf(s.color, result.regions[s.color]?.hex);
+    return { name: `Painted face ${si + 1} ${c}`, mesh: s.mesh, extruder: s.color + 1, subtype: 'modifier_part', color: c };
+  };
+
   if (result.mode === 'paint') {
     if (!result.model) throw new Error('paint mode result has no model');
     const baseColor = colorOf(0, result.regions[0]?.hex);
@@ -393,6 +400,9 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
             const c = colorOf(r.index, r.hex);
             parts.push({ name: c, mesh, extruder: r.index + 1, subtype: 'modifier_part', color: c });
           }
+          result.faceSkins.forEach((s, si) => {
+            if (s.objectIndex === j && s.partIndex === k) parts.push(skinPart(s, si));
+          });
           out.push({ name: mp.name, parts });
         });
       });
@@ -415,6 +425,9 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
         const c = colorOf(r.index, r.hex);
         parts.push({ name: c, mesh, extruder: r.index + 1, subtype: 'modifier_part', color: c });
       }
+      result.faceSkins.forEach((s, si) => {
+        if (s.objectIndex === j) parts.push(skinPart(s, si));
+      });
       return { name: obj.name, parts };
     });
   }

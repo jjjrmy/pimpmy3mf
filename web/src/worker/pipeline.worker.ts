@@ -97,7 +97,8 @@ async function renderPreview(result: Result, hexes: string[], src: RasterImage):
   mctx.fillStyle = '#ffffff';
   mctx.fillRect(0, 0, mapW, mapH);
   drawColorMap(mctx, mapRegions(result, hexes), result.frame, s);
-  if (result.mode === 'paint' && result.model) {
+  // Cylindrical projection unwraps the model, so a planar silhouette fade doesn't apply there.
+  if (result.mode === 'paint' && result.model && result.projection !== 'cylindrical') {
     const meshes = result.model.objects.flatMap((o) => o.parts.map((p) => p.mesh));
     fadeOutsideSilhouette(mctx, mapW, mapH, meshes, result.frame, result.axis, mkOffscreen);
   }
@@ -132,6 +133,11 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
         const hex = (hexes[i] ?? r.hex).slice(1);
         const suffix = result.mode === 'paint' ? '-modifier' : '';
         files[`${imageStem}-${i + 1}-${hex}${suffix}.stl`] = writeStl(r.mesh);
+      });
+      // one STL per painted-face skin (paint mode): <imageStem>-face-<n>-<HEX>.stl
+      result.faceSkins.forEach((s, i) => {
+        const hex = (hexes[s.color] ?? result.regions[s.color]?.hex ?? '#FFFFFF').slice(1);
+        files[`${imageStem}-face-${i + 1}-${hex}.stl`] = writeStl(s.mesh);
       });
       const bytes = zipSync(files, { level: 6 });
       return { filename: `${base}-${n}colors-stls.zip`, bytes, mime: 'application/zip', warnings: [] };

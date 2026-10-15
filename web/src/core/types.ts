@@ -4,6 +4,46 @@
 
 export type RGB = [number, number, number]; // 0..255
 export type Axis = 'z' | 'y' | 'x';
+/** Paint mode: 'planar' projects straight along `axis`; 'cylindrical' wraps the image around `axis`. */
+export type Projection = 'planar' | 'cylindrical';
+export type Vec3 = [number, number, number];
+
+/**
+ * A model face printed solid in one palette color (paint-face tool). Stored in as-loaded model space as triangle
+ * indices of one part's mesh, so it survives re-orientation (lay-on-face) and texture / settings changes.
+ */
+export interface PaintedFace {
+  /** Stable id (list key, links a FaceSkin back to its face). */
+  id: string;
+  objectIndex: number;
+  partIndex: number;
+  /** Indices of the triangles (into model.objects[objectIndex].parts[partIndex].mesh.triangles / 3) of the planar region. */
+  triangles: number[];
+  /** Palette index, 0-based (filament = color + 1). The pipeline clamps it to the current palette size. */
+  color: number;
+  /** Region area in mm² (pose-independent). */
+  area: number;
+}
+
+/** Cylindrical projection geometry. Basis per axis: CYL_BASIS in src/core/cylinder.ts. */
+export interface CylinderFrame {
+  /** The model's bbox center (cylinder axis passes through it), in result.model coordinates. */
+  center: Vec3;
+  axis: Axis;
+  /** Reference radius: the model's max radial distance from the axis. Frame u = R0·φ, φ ∈ [0, 2π). */
+  R0: number;
+}
+
+/** Paint mode: the solid modifier that prints one painted face in its color. */
+export interface FaceSkin {
+  faceId: string;
+  objectIndex: number;
+  partIndex: number;
+  /** Palette index after clamping (filament = color + 1). */
+  color: number;
+  /** Face region extruded 1 mm inward (along -normal) and 0.05 mm outward, in result.model coordinates. */
+  mesh: Mesh;
+}
 
 /** Decoded image: RGBA 8-bit, row-major, first row = top of the picture. */
 export interface RasterImage {
@@ -61,8 +101,21 @@ export interface Params {
   minFeature: number;
   /** Tracing grid pitch in mm. */
   resolution: number;
-  /** Paint mode projection direction: z = top-down, y = from the front (default), x = from the side. */
+  /**
+   * Paint mode. Planar: projection direction, z = top-down, y = from the front (default), x = from the side.
+   * Cylindrical: the cylinder axis (through the model's bbox center); the UI defaults it to z there.
+   */
   axis: Axis;
+  /** Paint mode projection type (default 'planar'). */
+  projection: Projection;
+  /**
+   * Paint mode: whole-model rotation (row-major 3x3, proper rotation) applied to the loaded model about its bbox
+   * center; the model is then dropped onto the bed (min z = 0) keeping its XY bbox center. null = as loaded,
+   * untouched. Set by lay-on-face. Projection, crops and exports all use the re-oriented model.
+   */
+  orientation: number[] | null;
+  /** Paint mode: faces printed solid in one color ~1 mm deep (later entries win where they overlap). */
+  paintedFaces: PaintedFace[];
   /**
    * Pattern rotation in degrees, counter-clockwise in the 2D map (y up), about the frame center. Applied in
    * both modes. In paint fit mode the cover scale grows so the rotated image still covers the frame.
@@ -89,6 +142,9 @@ export const DEFAULT_PARAMS: Params = {
   minFeature: 0.6,
   resolution: 0.1,
   axis: 'y',
+  projection: 'planar',
+  orientation: null,
+  paintedFaces: [],
   rotation: 0,
   offsetX: 0,
   offsetY: 0,
@@ -140,11 +196,26 @@ export interface Result {
   mode: 'image' | 'paint';
   regions: ColorRegion[];
   frame: Frame;
-  /** Size of one copy of the image in mm; `repeat` = tiled over the model (paint mode with a width). */
-  tile: { w: number; h: number; repeat: boolean };
+  /**
+   * Size of one copy of the image in mm; `repeat` = tiled over the model (paint mode with a width).
+   * `wraps`: cylindrical only, how many copies fit around the circumference (tile width snapped so they wrap
+   * seamlessly; 1 in fit mode); null for planar / image mode.
+   */
+  tile: { w: number; h: number; repeat: boolean; wraps: number | null };
   axis: Axis;
-  /** Paint mode: the model as loaded (structure preserved, world coordinates). null in image mode. */
+  /** Projection used ('planar' in image mode). */
+  projection: Projection;
+  /** Cylindrical: the wrap geometry (frame u = arc length R0·φ, v = (p - center)·axis). null otherwise. */
+  cylinder: CylinderFrame | null;
+  /** Echo of params.orientation for this result (null = as loaded). result.model is already in this pose. */
+  orientation: number[] | null;
+  /** Paint mode: the model (structure preserved, world coordinates), re-oriented when orientation is set. null in image mode. */
   model: Model | null;
+  /**
+   * Paint mode: one solid modifier per painted face (in result.model coordinates). The camo modifiers (region
+   * mesh / objectMeshes / partMeshes) already have these volumes subtracted. [] when none / image mode.
+   */
+  faceSkins: FaceSkin[];
   stats: {
     imageW: number; // original image size in px
     imageH: number;
