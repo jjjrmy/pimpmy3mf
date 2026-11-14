@@ -58,6 +58,19 @@ def filament_for(idx, machine_name):
     return None
 
 
+def compatible_process(idx, proc, machine_name):
+    """The machine's default process, or (when the profile data points at one that isn't compatible, e.g.
+    1.10's P1S 0.2 -> a P1P process) a process with the same layer/quality prefix that lists the machine."""
+    d = idx.get(proc) if proc else None
+    if d is None or machine_name in (d.get("compatible_printers") or []) or not d.get("compatible_printers"):
+        return proc
+    prefix = proc.split(" @")[0]                      # e.g. "0.10mm Standard"
+    for n, pd in sorted(idx.items()):
+        if n.startswith(prefix + " @") and machine_name in (pd.get("compatible_printers") or []):
+            return n
+    return proc
+
+
 def enumerate_combos(idx):
     """id -> {label, machine, process, filament, printer, nozzle, dual}. Process/filament come from the
     machine preset's default_print_profile / default_filament_profile, falling back to a hardcoded gap
@@ -72,6 +85,7 @@ def enumerate_combos(idx):
             if not m:
                 continue
             proc = first(m.get("default_print_profile")) or FALLBACK_PROC.get((model, nz))
+            proc = compatible_process(idx, proc, mname)
             fil = first(m.get("default_filament_profile")) or FALLBACK_FIL.get((model, nz)) or filament_for(idx, mname)
             nd = m.get("nozzle_diameter") or []
             combos[f"{slug}-{nz}"] = dict(
@@ -112,7 +126,11 @@ def preset_index(binary):
     app = Path(binary).resolve().parents[1]
     roots = glob.glob(str(app / "Resources/profiles/*/*/*.json"))
     roots += glob.glob(str(app / "Resources/profiles/*/*/*/*.json"))
-    cache = glob.glob(os.path.expanduser("~/Library/Application Support/BambuStudio/system/*/*/*.json"))
+    # The downloaded cache belongs to the INSTALLED Studio. Capturing with another build (e.g. an extracted
+    # 1.10 via BAMBU_STUDIO) must use only that build's bundled profiles, or newer presets leak in.
+    installed = Path(BAMBU_APP).resolve()
+    use_cache = installed == app.parent or installed in app.parents
+    cache = glob.glob(os.path.expanduser("~/Library/Application Support/BambuStudio/system/*/*/*.json")) if use_cache else []
     idx = {}
     for f in cache + roots:         # the downloaded system cache is newer than the bundle when both exist
         try:
@@ -469,6 +487,16 @@ def main():
         sys.exit("Bambu Studio CLI not found")
     idx = preset_index(binary)
     combos = enumerate_combos(idx)
+    # Capturing with an OLDER Studio (BAMBU_STUDIO -> e.g. 1.10) keeps the project openable there, but a newer
+    # Studio then falls back to generic defaults for every setting the old one doesn't know, and some break
+    # slicing (0.8 nozzle: "Too small line width"). So also capture each combo with the installed Studio and
+    # fill those keys from it; the older Studio ignores keys it doesn't know.
+    installed = BAMBU_APP + "/Contents/MacOS/BambuStudio"
+    newer = None
+    if os.path.isfile(installed) and Path(installed).resolve() != Path(binary).resolve():
+        nidx = preset_index(installed)
+        newer = (installed, nidx, enumerate_combos(nidx))
+        log(f"filling newer-only keys from {installed}")
     explicit = bool(args.printer)
     pids = args.printer or list(combos)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
@@ -484,6 +512,18 @@ def main():
             log(f"\n=== {pid}: SKIP dual-nozzle (not sliceable headless; see notes) ===")
             continue
         r = capture_printer(binary, idx, pid, combos[pid], args.keep)
+        if r and newer and pid in newer[2]:
+            n = capture_printer(newer[0], newer[1], pid, newer[2][pid], args.keep)
+            if not n:
+                log(f"  {pid}: newer-Studio capture FAILED; template not written")
+                r = None
+            else:
+                added = [k for k in n["base"] if k not in r["base"]]
+                for k in added:
+                    r["base"][k] = n["base"][k]
+                    if k in n["resize"]:
+                        r["resize"][k] = n["resize"][k]
+                log(f"  {pid}: filled {len(added)} newer-only keys")
         if r:
             results[pid] = r
     log("\n==== captured:", ", ".join(sorted(results)) or "(none)")
@@ -520,12 +560,25 @@ def write_loaders():
     log(f"  wrote {out}  ({len(ids)} templates)")
 
 
+FORCE_REPEAT = (
+    "filament_shrink", "activate_air_filtration", "chamber_temperatures", "complete_print_exhaust_fan_speed",
+    "during_print_exhaust_fan_speed", "supertack_plate_temp", "supertack_plate_temp_initial_layer",
+)
+
+
 def build_template(r):
     """Compact per-printer template consumed by src/core/threemf.ts.
 
     `base` is the full N=1 project_settings dict; `resize` tells the writer how to grow each
     N-dependent key. flush_multiplier/min/max let the writer rebuild the flush matrix."""
     base = dict(r["base"])
+    resize = dict(r["resize"])
+    # Per-filament keys that Studio 1.10 exports as a single value whatever N is. Left at length 1, a
+    # multi-filament project with modifiers fails to slice (filament_shrink: "Failed slicing the model").
+    # Repeat them per filament like 2.x does; same value, so harmless where Studio reads only [0].
+    for k in FORCE_REPEAT:
+        if isinstance(base.get(k), list) and len(base[k]) == 1 and k not in resize:
+            resize[k] = "repeat"
     # normalize the fields the writer always overrides so the template is deterministic.
     base["curr_bed_type"] = "Textured PEI Plate"
     base["wipe_tower_x"] = ["15"]
@@ -540,7 +593,7 @@ def build_template(r):
         "plate": "Textured PEI Plate",
         "appVersion": base.get("version", ""),
         "flush": {"min": r["flush_min"], "max": 900},
-        "resize": r["resize"],
+        "resize": resize,
         "base": base,
     }
 

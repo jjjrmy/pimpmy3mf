@@ -33,6 +33,16 @@ runs along the axis and repeats if it is shorter than the model. Each color beco
 --size tiles the pattern N times around; --rotate / --offset still apply, and --offset X turns the
 pattern around the axis.
 
+Bambu Studio versions: the project is written by the Bambu Studio CLI, so it opens only in that
+Studio version or newer (1.10 refuses a project made by 2.x). To build one for an older Studio, point
+BAMBU_STUDIO at that version's binary, e.g.
+  BAMBU_STUDIO=/path/to/BambuStudio.app/Contents/MacOS/BambuStudio img2color ... --printer "Bambu Lab X1 Carbon 0.4 nozzle"
+It then uses only that build's bundled presets. A --process/--filament it lacks, or one made for
+another printer, falls back to the printer's defaults; a printer it lacks (P2S, H2 under 1.10)
+gives a plain 3MF. If the installed Studio has the same printer, the settings the older one lacks
+are filled in from it, so newer Studios slice the project too. Or use --no-bambu for a plain 3MF
+that any version opens (Studio 1.10 ignores its per-part filaments, so there it prints in one color).
+
 --rotate DEG turns the pattern counterclockwise (as seen in the preview) about the center of the
 covered area, then --offset X,Y shifts it in mm (+X right, +Y up). A turned or shifted pattern
 repeats past the image edges, so nothing is left uncovered; without --size, --apply-to also scales
@@ -48,6 +58,7 @@ Examples:
   img2color camo.png --colors=3 --apply-to can.stl --projection cylindrical  # wrap the pattern around the model
 """
 import argparse
+import copy
 import glob
 import json
 import math
@@ -687,14 +698,29 @@ def bambu_binary():
     return None
 
 
+def studio_version(binary):
+    """Bundle version of the Studio that owns binary, e.g. '01.10.01.50', or '' if unknown."""
+    try:
+        import plistlib
+        plist = Path(binary).resolve().parents[1] / "Info.plist"
+        return plistlib.load(open(plist, "rb")).get("CFBundleShortVersionString", "")
+    except Exception:
+        return ""
+
+
 def preset_index(binary):
     """name -> preset dict, from Bambu's bundled system profiles and the user's own presets."""
     roots = []
     app = Path(binary).resolve().parents[1]
     roots += glob.glob(str(app / "Resources/profiles/*/*/*.json"))
     roots += glob.glob(str(app / "Resources/profiles/*/*/*/*.json"))
-    user = glob.glob(os.path.expanduser("~/Library/Application Support/BambuStudio/user/*/*/*.json"))
-    user += glob.glob(os.path.expanduser("~/Library/Application Support/BambuStudio/system/*/*/*.json"))
+    # ~/Library presets belong to the INSTALLED Studio. Another build (e.g. an extracted 1.10 via
+    # BAMBU_STUDIO) uses only its own bundled profiles, or newer presets leak in and fail its checks.
+    installed = Path(BAMBU_APP).resolve()
+    user = []
+    if installed == app.parent or installed in app.parents:
+        user = glob.glob(os.path.expanduser("~/Library/Application Support/BambuStudio/user/*/*/*.json"))
+        user += glob.glob(os.path.expanduser("~/Library/Application Support/BambuStudio/system/*/*/*.json"))
     idx = {}
     for f in user + roots:          # user presets win over system ones with the same name
         try:
@@ -741,7 +767,47 @@ def plate_size(machine):
         return 256.0, 256.0
 
 
-def place_towers(project, pw, pd, tw, td, restore):
+def exclude_box(area):
+    """Bounding box ((x0, y0), (x1, y1)) of a bed_exclude_area polygon ['0x0', '18x0', ...], or None."""
+    try:
+        pts = np.array([[float(c) for c in p.split("x")] for p in area])
+    except Exception:
+        return None
+    if len(pts) < 3 or np.ptp(pts[:, 0]) <= 0 or np.ptp(pts[:, 1]) <= 0:
+        return None
+    return pts.min(0), pts.max(0)
+
+
+def pad_filament_lists(project, binary, filament, n):
+    """Studio 1.10's CLI saves some per-filament settings (filament_shrink, ...) with one entry
+    however many filaments there are; both 1.10 and 2.x then slice every part with filament 1.
+    Repeat those single entries once per filament."""
+    keys = set(filament)
+    try:        # every filament option this Studio knows, not just the ones the preset sets
+        common = Path(binary).resolve().parents[1] / "Resources/profiles/BBL/filament/fdm_filament_common.json"
+        keys |= set(json.load(open(common)))
+    except Exception:
+        pass
+    z = zipfile.ZipFile(project)
+    cfg = json.loads(z.read("Metadata/project_settings.config"))
+    short = [k for k in keys if isinstance(cfg.get(k), list) and len(cfg[k]) == 1 and n > 1]
+    if not short:
+        z.close()
+        return
+    for k in short:
+        cfg[k] = cfg[k] * n
+    tmp = project + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        for info in z.infolist():
+            data = z.read(info.filename)
+            if info.filename == "Metadata/project_settings.config":
+                data = json.dumps(cfg, indent=4).encode()
+            out.writestr(info, data)
+    z.close()
+    os.replace(tmp, project)
+
+
+def place_towers(project, pw, pd, tw, td, restore, exclude=None):
     """After Bambu's arrange, give each plate's prime tower (tw x td mm) a free spot of its own and
     put back the project settings in restore. Bambu keeps tower positions per plate
     (wipe_tower_x/y lists). Plates sit in a grid of ceil(sqrt(n)) columns, 1.2 plate sizes apart.
@@ -760,6 +826,8 @@ def place_towers(project, pw, pd, tw, td, restore):
     for i, ids in enumerate(plates):
         origin = np.array([(i % cols) * pw * 1.2, -(i // cols) * pd * 1.2])
         local = [(boxes[j][0] - origin - 5, boxes[j][1] - origin + 5) for j in ids if j in boxes]
+        if exclude:
+            local.append((exclude[0] - 5, exclude[1] + 5))
         spot = next(((x, y) for s in range(0, int(pw + pd), 5) for x in range(5, s + 6, 5)
                      for y in [5 + s - (x - 5)] if x + tw <= pw - 5 and y + td <= pd - 5
                      and all(x + tw <= a[0] or x >= b[0] or y + td <= a[1] or y >= b[1] for a, b in local)), None)
@@ -781,20 +849,91 @@ def place_towers(project, pw, pd, tw, td, restore):
     return bad
 
 
-def bambu_project(objects, out_3mf, hexes, args):
+def fill_from_installed(objects, project, hexes, args, binary, say):
+    """An older Studio (BAMBU_STUDIO) writes none of the settings newer Studios added; a newer Studio
+    opening the project then uses generic defaults (e.g. 0.45 mm line widths, too narrow for a
+    0.8 nozzle: "Too small line width"). When the installed Studio has the same printer, export the
+    same input through it too and copy in every project setting the older project lacks. Older
+    Studios ignore keys they don't know; the older version stamp and values are kept."""
+    installed = BAMBU_APP + "/Contents/MacOS/BambuStudio"
+    if not (os.path.isfile(installed) and os.access(installed, os.X_OK)):
+        return
+    if Path(binary).resolve() == Path(installed).resolve():
+        return
+    if args.printer not in preset_index(installed):
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = f"{tmp}/ref.3mf"
+        if bambu_project(objects, ref, hexes, copy.copy(args), binary=installed, quiet=True) is None \
+                or not os.path.isfile(ref):
+            say("note: could not export a reference project with the installed Bambu Studio; "
+                "newer Studios may use their defaults for settings this one doesn't have")
+            return
+        extra = json.loads(zipfile.ZipFile(ref).read("Metadata/project_settings.config"))
+    z = zipfile.ZipFile(project)
+    cfg = json.loads(z.read("Metadata/project_settings.config"))
+    added = {k: v for k, v in extra.items() if k not in cfg}
+    if not added:
+        z.close()
+        return
+    cfg.update(added)
+    tmpf = project + ".tmp"
+    with zipfile.ZipFile(tmpf, "w", zipfile.ZIP_DEFLATED) as out:
+        for info in z.infolist():
+            data = z.read(info.filename)
+            if info.filename == "Metadata/project_settings.config":
+                data = json.dumps(cfg, indent=4).encode()
+            out.writestr(info, data)
+    z.close()
+    os.replace(tmpf, project)
+
+
+def bambu_project(objects, out_3mf, hexes, args, binary=None, quiet=False):
     """Load the objects in Bambu Studio's CLI with one filament per color and save a real project
     (printer/process presets, filament colors, bed plate, thumbnails).
     Returns a short layout note on success, None on failure."""
-    binary = bambu_binary()
+    say = (lambda m: None) if quiet else log
+    binary = binary or bambu_binary()
     if not binary:
         return None
+    orig_args = copy.copy(args)
+    idx = preset_index(binary)
+    if args.printer not in idx:
+        ver = studio_version(binary) or "?"
+        printers = sorted(n for n, d in idx.items() if d.get("type") == "machine"
+                          and d.get("instantiation") == "true" and n.startswith("Bambu Lab"))
+        say(f"error: Bambu Studio {ver} ({binary}) has no printer preset {args.printer!r}; "
+            f"writing a plain 3MF instead.\n   printers it has: {', '.join(printers) or '(none)'}")
+        return None
+
+    def first(v):
+        return (v[0] if isinstance(v, list) and v else v) or None
+
     try:
-        idx = preset_index(binary)
         machine = resolve_preset(idx, args.printer, "printer")
-        process = resolve_preset(idx, args.process, "process")
-        filament = resolve_preset(idx, args.filament, "filament")
+        # A process/filament name this Studio doesn't ship (e.g. the P2S defaults under 1.10) falls
+        # back to the printer's own default_print_profile / default_filament_profile.
+        # Same for a system preset made for another printer (the P2S defaults with --printer X1C).
+        def unusable(name):
+            if name not in idx:
+                return "not found"
+            ok = resolve_preset(idx, name, "preset").get("compatible_printers") or []
+            return "not for this printer" if ok and args.printer not in ok else None
+
+        proc_name, fil_name = args.process, args.filament
+        why = unusable(proc_name)
+        if why and first(machine.get("default_print_profile")) in idx:
+            proc_name = first(machine["default_print_profile"])
+            say(f"note: process {args.process!r} {why}; using the printer's default {proc_name!r}")
+        why = unusable(fil_name)
+        if why and first(machine.get("default_filament_profile")) in idx:
+            fil_name = first(machine["default_filament_profile"])
+            say(f"note: filament {args.filament!r} {why}; using the printer's default {fil_name!r}")
+        process = resolve_preset(idx, proc_name, "process")
+        filament = resolve_preset(idx, fil_name, "filament")
+        args.process, args.filament = proc_name, fil_name      # so the summary names what was used
     except RuntimeError as e:
-        log(f"warning: {e}; writing a plain 3MF instead")
+        say(f"warning: {e}; writing a plain 3MF instead")
         return None
     process["curr_bed_type"] = args.plate
     pw, pd = plate_size(machine)
@@ -812,9 +951,14 @@ def bambu_project(objects, out_3mf, hexes, args):
     multi = len(hexes) > 1
     tower = float(process.get("prime_tower_width", 35)) + 2 * float(process.get("prime_tower_brim_width", 3))
 
+    # X1/P1 beds have a front-left exclude area (the cutter); a tower touching it fails to slice.
+    ex = exclude_box(machine.get("bed_exclude_area", []))
+    left_y = max(10.0, ex[1][1] + 5) if ex else 10.0
+    front_x = max(5.0, ex[1][0] + 5) if ex else 5.0
+
     def tower_spot(fp):
         left, front = (pw - fp[0]) / 2 - 5, (pd - fp[1]) / 2 - 5
-        return ("5", "10") if left >= tower + 3 else ("5", "5") if front >= 40 else None
+        return ("5", f"{left_y:g}") if left >= tower + 3 else (f"{front_x:g}", "5") if front >= 40 else None
 
     # Several objects: keep their layout (centered on the plate) when it is printable as is: they
     # fit next to the prime tower, don't overlap from above and all stand on the bed. Otherwise
@@ -839,7 +983,7 @@ def bambu_project(objects, out_3mf, hexes, args):
         if spot:
             process["wipe_tower_x"], process["wipe_tower_y"] = [spot[0]], [spot[1]]
         else:
-            log(f"note: at {fp[0]:.0f} x {fp[1]:.0f} mm there is no free strip on the "
+            say(f"note: at {fp[0]:.0f} x {fp[1]:.0f} mm there is no free strip on the "
                 f"{pw:.0f} mm bed for the prime tower; move it in Bambu Studio or use a smaller --size")
     # Bambu's arrange packs plates edge to edge and ignores the prime tower; while it arranges,
     # fence off the front-left corner (bed exclude area) so every plate keeps room for one.
@@ -847,7 +991,9 @@ def bambu_project(objects, out_3mf, hexes, args):
     fence = multi and arrange == "1" and len(objects) > 1
     keep_exclude = machine.get("bed_exclude_area", [])
     if fence:
-        fx, fy = 5 + tower + 5, 10 + tower_d + 5
+        fx, fy = 5 + tower + 5, left_y + tower_d + 5
+        if ex:
+            fx, fy = max(fx, ex[1][0]), max(fy, ex[1][1])
         machine["bed_exclude_area"] = ["0x0", f"{fx:g}x0", f"{fx:g}x{fy:g}", f"0x{fy:g}"]
     with tempfile.TemporaryDirectory() as tmp:
         plain = f"{tmp}/plain.3mf"
@@ -868,18 +1014,20 @@ def bambu_project(objects, out_3mf, hexes, args):
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=tmp)
         except subprocess.TimeoutExpired:
-            log("warning: Bambu Studio CLI timed out; writing a plain 3MF instead")
+            say("warning: Bambu Studio CLI timed out; writing a plain 3MF instead")
             return None
         if r.returncode != 0 or not os.path.isfile(out_abs):
             tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
-            log(f"warning: Bambu Studio CLI failed (exit {r.returncode}); writing a plain 3MF instead")
+            say(f"warning: Bambu Studio CLI failed (exit {r.returncode}); writing a plain 3MF instead")
             for line in tail:
-                log("   " + line[:200])
+                say("   " + line[:200])
             return None
+    pad_filament_lists(out_abs, binary, filament, len(hexes))
+    fill_from_installed(objects, out_abs, hexes, orig_args, binary, say)
     if fence:
-        bad = place_towers(out_abs, pw, pd, tower, tower_d, {"bed_exclude_area": keep_exclude})
+        bad = place_towers(out_abs, pw, pd, tower, tower_d, {"bed_exclude_area": keep_exclude}, ex)
         if bad:
-            log(f"note: no free spot for the prime tower on plate {', '.join(map(str, bad))}; "
+            say(f"note: no free spot for the prime tower on plate {', '.join(map(str, bad))}; "
                 f"move it in Bambu Studio")
     return note
 
@@ -935,7 +1083,8 @@ def main():
     ap = argparse.ArgumentParser(
         prog="img2color", formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Image -> one 3D shape per color (STL + Bambu-ready 3MF).",
-        epilog="Examples:" + __doc__.split("Examples:", 1)[1])
+        epilog="Bambu Studio versions:" + __doc__.split("Bambu Studio versions:", 1)[1].split("\n\n", 1)[0]
+        + "\n\nExamples:" + __doc__.split("Examples:", 1)[1])
     ap.add_argument("image", help="input image (png, jpg, webp, ...)")
     ap.add_argument("-c", "--colors", type=int, default=3, help="number of colors (default 3)")
     ap.add_argument("-p", "--palette", help='use exactly these colors, in filament order: "#1E1E1E,#8B3A3A,#999"')

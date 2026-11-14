@@ -274,6 +274,11 @@ export interface PrinterPreset {
   nozzle: string;
   /** Printable bed size in mm. */
   bed: [number, number];
+  /**
+   * Oldest Bambu Studio that opens the project: the version its template was captured with ('1.10' for
+   * the printers Studio 1.10 ships, '2.8' for newer printers like the P2S / H2S). Shown in the export UI.
+   */
+  minStudio: string;
 }
 
 export interface BambuProjectOptions {

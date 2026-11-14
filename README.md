@@ -61,6 +61,19 @@ Output goes next to the image in `<name>-<N>colors/`:
 - a preview PNG;
 - `colors.txt`.
 
+**Bambu Studio version:** the project opens in the Studio version that built it, or newer (Studio 1.10
+refuses a 2.x project). To make one for an older Studio, point `BAMBU_STUDIO` at that version's binary;
+it then uses only that build's own presets, and fills in the settings it lacks from the installed
+Studio (same printer) so newer Studios slice the project too:
+
+```sh
+BAMBU_STUDIO=/path/to/BambuStudio.app/Contents/MacOS/BambuStudio \
+  img2color camo.png --colors=3 --printer "Bambu Lab X1 Carbon 0.4 nozzle"
+```
+
+Otherwise use `--no-bambu` for a plain 3MF that any version opens (Studio 1.10 ignores its per-part
+filaments, though, so it prints in one color there).
+
 ## License
 
 [MIT](LICENSE) © 2026 Jeremy Holstein

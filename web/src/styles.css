@@ -1258,6 +1258,13 @@ input[type='color'] {
 .popover .hint {
   margin: 0;
 }
+.popover .hint-warn {
+  max-width: 240px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 205, 0, 0.16);
+  border: 1px solid rgba(255, 205, 0, 0.55);
+}
 .popover-menu {
   min-width: 170px;
   padding: 6px;

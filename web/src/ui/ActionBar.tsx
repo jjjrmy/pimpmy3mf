@@ -138,6 +138,14 @@ export function ActionBar(props: ActionBarProps) {
                   </select>
                 </label>
                 <p className="hint">Textured PEI plate · one PLA Basic filament per color</p>
+                {current.minStudio.startsWith('1.') ? (
+                  <p className="hint">Opens in Bambu Studio {current.minStudio} and newer.</p>
+                ) : (
+                  <p className="hint hint-warn">
+                    Needs Bambu Studio {current.minStudio} or newer. Older versions don't know the{' '}
+                    {current.printer.replace(/^Bambu Lab /, '')}.
+                  </p>
+                )}
                 <button
                   type="button"
                   className="btn-chunky"

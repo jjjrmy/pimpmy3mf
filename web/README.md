@@ -80,6 +80,10 @@ Both use the same algorithm.
   X1 Carbon, X1, X1E, P1S, P1P, A1, A1 mini and H2S, each with 0.2 / 0.4 / 0.6 / 0.8.
   - Each template was captured from Bambu Studio's own CLI exports and checked by slicing a
     generated project: return code 0, the right filament colors, and every filament extruding.
+  - **Studio versions:** projects for the printers that Bambu Studio 1.10 ships (X1 Carbon, X1, X1E, P1S,
+    P1P, A1, A1 mini) are built from 1.10 templates, so they open in Studio 1.10 and every newer version.
+    P2S and H2S only exist in Studio 2.x, so their projects need Studio 2.8 or newer. (Studio 1.10
+    opens the plain .3mf but ignores its per-part filaments, so it prints in one color there.)
   - The dual-nozzle H2C and H2D aren't supported yet.
 
 ## Run it
@@ -118,6 +122,7 @@ scripts/
   decode-image.py             image -> .rgba for headless.ts
   capture-bambu-templates.py  regenerate the Bambu templates from a local Bambu Studio (system presets only)
   validate-bambu.ts           build projects and slice them with the Bambu Studio CLI
+  validate-studio-compat.ts   every printer x case, sliced in Bambu Studio 1.10 and 2.8
   render-gcode.py             top-down G-code render colored by filament (used by the validator)
   presets/                    camo presets: fetch_camos.py (discover) -> build_presets.py (WebP + manifest)
                               -> upload_r2.py (to the R2 bucket); output in git-ignored presets-data/
@@ -129,8 +134,10 @@ Test fixtures live in the git-ignored `scratch/` folder.
 
 - A thickness or color change doesn't re-run tracing. A new image, color count, size, smoothing
   value or pattern transform does: about 0.5 s for a 512 px image at 100 mm.
-- The templates come from Bambu Studio 2.8. Run `scripts/capture-bambu-templates.py` again after a
-  Bambu Studio update.
+- The templates come from Bambu Studio 1.10 (the printers it ships) and 2.8 (P2S, H2S), so older
+  Studios can open the projects. To re-capture, run `scripts/capture-bambu-templates.py` with
+  `BAMBU_STUDIO` pointing at a 1.10 binary for the 1.10 printers, and with the installed Studio for the
+  rest. `scripts/validate-studio-compat.ts` slices every case in both versions.
 
 ## Credits
 

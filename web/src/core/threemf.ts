@@ -22,44 +22,47 @@ import { loadTemplate, type BambuTemplate } from './bambu/template';
  * correct colors, all filaments extruding). Dual-nozzle H2 (H2C/H2D) are intentionally absent — even
  * Bambu's own CLI-exported project fails to slice headless ("No valid nozzle found"). H2S is single
  * nozzle and is included. See scripts/validate-bambu.ts (sweep).
+ * Printers that Bambu Studio 1.10 ships (X1/X1C/X1E/P1P/P1S/A1/A1 mini) use templates captured with the
+ * 1.10 CLI, so their projects open in 1.10 and newer (2.x reads older projects). P2S / H2S only exist in
+ * 2.x, so theirs come from 2.8 (`minStudio`). See scripts/validate-studio-compat.ts.
  */
 export const PRINTERS: PrinterPreset[] = [
-  { id: 'p2s-0.4', label: 'Bambu Lab P2S 0.4 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.4', bed: [256, 256] },
-  { id: 'p2s-0.2', label: 'Bambu Lab P2S 0.2 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.2', bed: [256, 256] },
-  { id: 'p2s-0.6', label: 'Bambu Lab P2S 0.6 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.6', bed: [256, 256] },
-  { id: 'p2s-0.8', label: 'Bambu Lab P2S 0.8 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.8', bed: [256, 256] },
-  { id: 'x1c-0.4', label: 'Bambu Lab X1 Carbon 0.4 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.4', bed: [256, 256] },
-  { id: 'x1c-0.2', label: 'Bambu Lab X1 Carbon 0.2 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.2', bed: [256, 256] },
-  { id: 'x1c-0.6', label: 'Bambu Lab X1 Carbon 0.6 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.6', bed: [256, 256] },
-  { id: 'x1c-0.8', label: 'Bambu Lab X1 Carbon 0.8 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.8', bed: [256, 256] },
-  { id: 'x1-0.4', label: 'Bambu Lab X1 0.4 nozzle', printer: 'Bambu Lab X1', nozzle: '0.4', bed: [256, 256] },
-  { id: 'x1-0.2', label: 'Bambu Lab X1 0.2 nozzle', printer: 'Bambu Lab X1', nozzle: '0.2', bed: [256, 256] },
-  { id: 'x1-0.6', label: 'Bambu Lab X1 0.6 nozzle', printer: 'Bambu Lab X1', nozzle: '0.6', bed: [256, 256] },
-  { id: 'x1-0.8', label: 'Bambu Lab X1 0.8 nozzle', printer: 'Bambu Lab X1', nozzle: '0.8', bed: [256, 256] },
-  { id: 'x1e-0.4', label: 'Bambu Lab X1E 0.4 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.4', bed: [256, 256] },
-  { id: 'x1e-0.2', label: 'Bambu Lab X1E 0.2 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.2', bed: [256, 256] },
-  { id: 'x1e-0.6', label: 'Bambu Lab X1E 0.6 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.6', bed: [256, 256] },
-  { id: 'x1e-0.8', label: 'Bambu Lab X1E 0.8 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.8', bed: [256, 256] },
-  { id: 'p1s-0.4', label: 'Bambu Lab P1S 0.4 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.4', bed: [256, 256] },
-  { id: 'p1s-0.2', label: 'Bambu Lab P1S 0.2 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.2', bed: [256, 256] },
-  { id: 'p1s-0.6', label: 'Bambu Lab P1S 0.6 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.6', bed: [256, 256] },
-  { id: 'p1s-0.8', label: 'Bambu Lab P1S 0.8 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.8', bed: [256, 256] },
-  { id: 'p1p-0.4', label: 'Bambu Lab P1P 0.4 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.4', bed: [256, 256] },
-  { id: 'p1p-0.2', label: 'Bambu Lab P1P 0.2 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.2', bed: [256, 256] },
-  { id: 'p1p-0.6', label: 'Bambu Lab P1P 0.6 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.6', bed: [256, 256] },
-  { id: 'p1p-0.8', label: 'Bambu Lab P1P 0.8 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.8', bed: [256, 256] },
-  { id: 'a1-0.4', label: 'Bambu Lab A1 0.4 nozzle', printer: 'Bambu Lab A1', nozzle: '0.4', bed: [256, 256] },
-  { id: 'a1-0.2', label: 'Bambu Lab A1 0.2 nozzle', printer: 'Bambu Lab A1', nozzle: '0.2', bed: [256, 256] },
-  { id: 'a1-0.6', label: 'Bambu Lab A1 0.6 nozzle', printer: 'Bambu Lab A1', nozzle: '0.6', bed: [256, 256] },
-  { id: 'a1-0.8', label: 'Bambu Lab A1 0.8 nozzle', printer: 'Bambu Lab A1', nozzle: '0.8', bed: [256, 256] },
-  { id: 'a1mini-0.4', label: 'Bambu Lab A1 mini 0.4 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.4', bed: [180, 180] },
-  { id: 'a1mini-0.2', label: 'Bambu Lab A1 mini 0.2 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.2', bed: [180, 180] },
-  { id: 'a1mini-0.6', label: 'Bambu Lab A1 mini 0.6 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.6', bed: [180, 180] },
-  { id: 'a1mini-0.8', label: 'Bambu Lab A1 mini 0.8 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.8', bed: [180, 180] },
-  { id: 'h2s-0.4', label: 'Bambu Lab H2S 0.4 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.4', bed: [340, 320] },
-  { id: 'h2s-0.2', label: 'Bambu Lab H2S 0.2 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.2', bed: [340, 320] },
-  { id: 'h2s-0.6', label: 'Bambu Lab H2S 0.6 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.6', bed: [340, 320] },
-  { id: 'h2s-0.8', label: 'Bambu Lab H2S 0.8 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.8', bed: [340, 320] },
+  { id: 'p2s-0.4', label: 'Bambu Lab P2S 0.4 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.4', bed: [256, 256], minStudio: '2.8' },
+  { id: 'p2s-0.2', label: 'Bambu Lab P2S 0.2 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.2', bed: [256, 256], minStudio: '2.8' },
+  { id: 'p2s-0.6', label: 'Bambu Lab P2S 0.6 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.6', bed: [256, 256], minStudio: '2.8' },
+  { id: 'p2s-0.8', label: 'Bambu Lab P2S 0.8 nozzle', printer: 'Bambu Lab P2S', nozzle: '0.8', bed: [256, 256], minStudio: '2.8' },
+  { id: 'x1c-0.4', label: 'Bambu Lab X1 Carbon 0.4 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.4', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1c-0.2', label: 'Bambu Lab X1 Carbon 0.2 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.2', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1c-0.6', label: 'Bambu Lab X1 Carbon 0.6 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.6', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1c-0.8', label: 'Bambu Lab X1 Carbon 0.8 nozzle', printer: 'Bambu Lab X1 Carbon', nozzle: '0.8', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1-0.4', label: 'Bambu Lab X1 0.4 nozzle', printer: 'Bambu Lab X1', nozzle: '0.4', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1-0.2', label: 'Bambu Lab X1 0.2 nozzle', printer: 'Bambu Lab X1', nozzle: '0.2', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1-0.6', label: 'Bambu Lab X1 0.6 nozzle', printer: 'Bambu Lab X1', nozzle: '0.6', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1-0.8', label: 'Bambu Lab X1 0.8 nozzle', printer: 'Bambu Lab X1', nozzle: '0.8', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1e-0.4', label: 'Bambu Lab X1E 0.4 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.4', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1e-0.2', label: 'Bambu Lab X1E 0.2 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.2', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1e-0.6', label: 'Bambu Lab X1E 0.6 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.6', bed: [256, 256], minStudio: '1.10' },
+  { id: 'x1e-0.8', label: 'Bambu Lab X1E 0.8 nozzle', printer: 'Bambu Lab X1E', nozzle: '0.8', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1s-0.4', label: 'Bambu Lab P1S 0.4 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.4', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1s-0.2', label: 'Bambu Lab P1S 0.2 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.2', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1s-0.6', label: 'Bambu Lab P1S 0.6 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.6', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1s-0.8', label: 'Bambu Lab P1S 0.8 nozzle', printer: 'Bambu Lab P1S', nozzle: '0.8', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1p-0.4', label: 'Bambu Lab P1P 0.4 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.4', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1p-0.2', label: 'Bambu Lab P1P 0.2 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.2', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1p-0.6', label: 'Bambu Lab P1P 0.6 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.6', bed: [256, 256], minStudio: '1.10' },
+  { id: 'p1p-0.8', label: 'Bambu Lab P1P 0.8 nozzle', printer: 'Bambu Lab P1P', nozzle: '0.8', bed: [256, 256], minStudio: '1.10' },
+  { id: 'a1-0.4', label: 'Bambu Lab A1 0.4 nozzle', printer: 'Bambu Lab A1', nozzle: '0.4', bed: [256, 256], minStudio: '1.10' },
+  { id: 'a1-0.2', label: 'Bambu Lab A1 0.2 nozzle', printer: 'Bambu Lab A1', nozzle: '0.2', bed: [256, 256], minStudio: '1.10' },
+  { id: 'a1-0.6', label: 'Bambu Lab A1 0.6 nozzle', printer: 'Bambu Lab A1', nozzle: '0.6', bed: [256, 256], minStudio: '1.10' },
+  { id: 'a1-0.8', label: 'Bambu Lab A1 0.8 nozzle', printer: 'Bambu Lab A1', nozzle: '0.8', bed: [256, 256], minStudio: '1.10' },
+  { id: 'a1mini-0.4', label: 'Bambu Lab A1 mini 0.4 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.4', bed: [180, 180], minStudio: '1.10' },
+  { id: 'a1mini-0.2', label: 'Bambu Lab A1 mini 0.2 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.2', bed: [180, 180], minStudio: '1.10' },
+  { id: 'a1mini-0.6', label: 'Bambu Lab A1 mini 0.6 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.6', bed: [180, 180], minStudio: '1.10' },
+  { id: 'a1mini-0.8', label: 'Bambu Lab A1 mini 0.8 nozzle', printer: 'Bambu Lab A1 mini', nozzle: '0.8', bed: [180, 180], minStudio: '1.10' },
+  { id: 'h2s-0.4', label: 'Bambu Lab H2S 0.4 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.4', bed: [340, 320], minStudio: '2.8' },
+  { id: 'h2s-0.2', label: 'Bambu Lab H2S 0.2 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.2', bed: [340, 320], minStudio: '2.8' },
+  { id: 'h2s-0.6', label: 'Bambu Lab H2S 0.6 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.6', bed: [340, 320], minStudio: '2.8' },
+  { id: 'h2s-0.8', label: 'Bambu Lab H2S 0.8 nozzle', printer: 'Bambu Lab H2S', nozzle: '0.8', bed: [340, 320], minStudio: '2.8' },
 ];
 /** Bed plate types (curr_bed_type); the first entry is the default. Validated against the CLI on P2S. */
 export const PLATES: string[] = [
@@ -329,9 +332,11 @@ function buildModelSettings(
       }
       ids.forEach((m, k) => {
         if (plate.objectPlate[k] !== p) return;
+        // instance_id is the instance's index WITHIN its object (every object here has exactly one
+        // instance, so 0). Bambu 1.x rejects anything else ("invalid instance id") and then crashes.
         lines.push('  <model_instance>');
         lines.push(`   <metadata key="object_id" value="${m.rootId}"/>`);
-        lines.push(`   <metadata key="instance_id" value="${k}"/>`);
+        lines.push('   <metadata key="instance_id" value="0"/>');
         lines.push('  </model_instance>');
       });
       lines.push(' </plate>');
@@ -519,14 +524,15 @@ function exclusionTop(settings: Record<string, unknown>): number {
   return top;
 }
 
-/** Back-left prime-tower spot (local plate coords) beside a centred footprint, or null if none fits. */
-function towerSpot(bed: [number, number], footprint: [number, number], exTop: number, towerW: number): { x: number; y: number } | null {
-  if (towerW <= 0) return { x: 5, y: exTop > 0 ? exTop + 2 : 10 };
+/** Back-left prime-tower spot (local plate coords) beside a centred footprint, or null if none fits.
+ * `tower` is the conservative [x, y] extent (brim included) measured from the tower origin. */
+function towerSpot(bed: [number, number], footprint: [number, number], exTop: number, tower: [number, number]): { x: number; y: number } | null {
+  if (tower[0] <= 0) return { x: 5, y: exTop > 0 ? exTop + 2 : 10 };
   const left = (bed[0] - footprint[0]) / 2 - 5;
   const front = (bed[1] - footprint[1]) / 2 - 5;
   const towerY = exTop > 0 ? exTop + 2 : 10; // clear the exclusion band in y
-  if (left >= towerW + 3) return { x: 5, y: towerY };
-  if (exTop === 0 && front >= 40) return { x: 5, y: 5 };
+  if (left >= tower[0] + 3 && towerY + tower[1] <= bed[1] - 5) return { x: 5, y: towerY };
+  if (exTop === 0 && front >= tower[1] + 3 && tower[0] <= bed[0] - 10) return { x: 5, y: 5 };
   return null;
 }
 
@@ -546,7 +552,8 @@ const PLATE_GAP = 1.2; // Bambu's plate-grid spacing is 1.2 x bed
  * object to z = 0 and shelf-pack them (reserving the tower strip) across as few plates as needed,
  * laid out on Bambu's plate grid, with per-plate tower positions. Parts within an object never move.
  */
-function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: number, towerW: number): Layout {
+function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: number, tower: [number, number]): Layout {
+  const towerW = tower[0];
   const trim = (n: number): string => Number(n.toFixed(5)).toString();
   const xform = (tx: number, ty: number, tz: number): string => `1 0 0 0 1 0 0 0 1 ${trim(tx)} ${trim(ty)} ${trim(tz)}`;
   const bounds = objects.map(objectBounds);
@@ -556,7 +563,7 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: nu
   const uMinY = Math.min(...bounds.map((b) => b.minY));
   const uMaxY = Math.max(...bounds.map((b) => b.maxY));
   const footprint: [number, number] = [uMaxX - uMinX, uMaxY - uMinY];
-  const spot = towerSpot(bed, footprint, exTop, towerW);
+  const spot = towerSpot(bed, footprint, exTop, tower);
 
   let overlap = false;
   for (let i = 0; i < bounds.length && !overlap; i++)
@@ -652,10 +659,31 @@ export async function writeBambuProject(
     const f = parseFloat(String(Array.isArray(v) ? v[0] : v));
     return Number.isFinite(f) ? f : d;
   };
-  const towerW = colors.length > 1 ? num('prime_tower_width', 35) + 2 * num('prime_tower_brim_width', 3) : 0;
+  // Conservative prime-tower extent [x, y] incl. brim. The tower takes prime volume per tool change (flushes go
+  // to the chute); its area ~ changes/layer x prime volume x 1.5 (infill gap) / layer height. Studio 2.x rib-wall
+  // towers are square and ignore prime_tower_width (measured, 2.8: p2s/h2s 0.2 -> ~48 mm, 0.4 -> ~38 mm, the
+  // same for width 35 and 60); 1.10 / non-rib towers are prime_tower_width wide, depth = area / width.
+  // +6 covers walls/ribs (measured overshoot <= 6 mm on p2s/h2s 0.2-0.8).
+  const tower: [number, number] = [0, 0];
+  if (colors.length > 1) {
+    const maxOf = (k: string): number => {
+      const v = settings[k];
+      const fs = (Array.isArray(v) ? v : [v]).map((x) => parseFloat(String(x))).filter(Number.isFinite);
+      return fs.length ? Math.max(...fs) : 0;
+    };
+    const brim = num('prime_tower_brim_width', 3);
+    const width = num('prime_tower_width', 35);
+    const lh = Math.min(num('layer_height', 0.2), num('initial_layer_print_height', 0.2)) || 0.2;
+    const prime = Math.max(45, maxOf('filament_prime_volume'), maxOf('prime_volume'));
+    const area = ((colors.length - 1) * prime * 1.5) / lh;
+    const walls = 6 + 2 * brim;
+    const side = Math.sqrt(area) + walls + Math.max(0, num('prime_tower_extra_rib_length', 0));
+    tower[0] = Math.max(width + 2 * brim, side);
+    tower[1] = Math.max(area / width + walls, side);
+  }
   const exTop = exclusionTop(settings);
 
-  const layout = layoutObjects(objects, tmpl.bed, exTop, towerW);
+  const layout = layoutObjects(objects, tmpl.bed, exTop, tower);
   const warnings = layout.warnings;
   // per-plate prime-tower positions (one list entry per plate)
   settings.wipe_tower_x = layout.plates.map((p) => String(p.towerX));
