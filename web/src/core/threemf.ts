@@ -511,29 +511,104 @@ function objectBounds(o: ExportObject): Bounds {
   return meshBounds(normals.length ? normals : o.parts.map((p) => p.mesh));
 }
 
-/** Max y of the machine's front-left exclusion rectangle (0 if none). */
-function exclusionTop(settings: Record<string, unknown>): number {
-  const excl = settings.bed_exclude_area;
-  let top = 0;
-  if (Array.isArray(excl)) {
-    for (const pt of excl) {
-      const y = parseFloat(String(pt).split('x')[1]);
-      if (Number.isFinite(y) && y > top) top = y;
-    }
-  }
-  return top;
+interface Rect { x0: number; y0: number; x1: number; y1: number }
+type Pt = [number, number];
+
+/** A Bambu point list ["0x0", "18x0", ...] as a polygon (empty / malformed -> []). */
+function parsePoly(v: unknown): Pt[] {
+  if (!Array.isArray(v)) return [];
+  const pts = v.map((s) => String(s).split('x').map(parseFloat)).filter((p) => p.length === 2 && p.every(Number.isFinite));
+  return pts.length >= 3 ? (pts as Pt[]) : [];
 }
 
-/** Back-left prime-tower spot (local plate coords) beside a centred footprint, or null if none fits.
- * `tower` is the conservative [x, y] extent (brim included) measured from the tower origin. */
-function towerSpot(bed: [number, number], footprint: [number, number], exTop: number, tower: [number, number]): { x: number; y: number } | null {
-  if (tower[0] <= 0) return { x: 5, y: exTop > 0 ? exTop + 2 : 10 };
-  const left = (bed[0] - footprint[0]) / 2 - 5;
-  const front = (bed[1] - footprint[1]) / 2 - 5;
-  const towerY = exTop > 0 ? exTop + 2 : 10; // clear the exclusion band in y
-  if (left >= tower[0] + 3 && towerY + tower[1] <= bed[1] - 5) return { x: 5, y: towerY };
-  if (exTop === 0 && front >= tower[1] + 3 && tower[0] <= bed[0] - 10) return { x: 5, y: 5 };
-  return null;
+/** The machine's no-print polygons (X1/P1: the 18 x 28 mm purge-chute corner at the front-left). */
+function exclusionPolys(settings: Record<string, unknown>): Pt[][] {
+  const p = parsePoly(settings.bed_exclude_area);
+  return p.length ? [p] : [];
+}
+
+function pointInPoly(x: number, y: number, poly: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function segmentsCross(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const o = (p: Pt, q: Pt, r: Pt): number => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
+  return o(a, b, c) !== o(a, b, d) && o(c, d, a) !== o(c, d, b);
+}
+
+/** Does an axis-aligned rect touch a polygon (overlap, containment either way, or crossing edges)? */
+function rectHitsPoly(r: Rect, poly: Pt[]): boolean {
+  const corners: Pt[] = [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]];
+  if (poly.some(([x, y]) => x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1)) return true;
+  if (corners.some(([x, y]) => pointInPoly(x, y, poly))) return true;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    for (let k = 0; k < 4; k++) if (segmentsCross(a, b, corners[k], corners[(k + 1) % 4])) return true;
+  }
+  return false;
+}
+
+const rectsOverlap = (a: Rect, b: Rect): boolean => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+/** What the prime tower needs on the plate, for placing it. */
+interface TowerSpec {
+  /** Conservative [x, y] extent, brim included, from the tower's brim corner. [0, 0] = no tower (1 color). */
+  size: [number, number];
+  brim: number;
+  /** Plate-local printable area bbox and the machine's no-print polygons. */
+  bed: Rect;
+  exclude: Pt[][];
+}
+
+/** Footprint of a tower whose origin (wipe_tower_x/y) is (x, y), with a 3 mm safety margin all round.
+ * Measured: Studio draws the brim ~3-5 mm left of / below the origin and the body up to `size` beyond it. */
+function towerRect(x: number, y: number, t: TowerSpec): Rect {
+  const lo = t.brim + 3;
+  return { x0: x - lo, y0: y - lo, x1: x - t.brim + t.size[0] + 3, y1: y - t.brim + t.size[1] + 3 };
+}
+
+/**
+ * Prime-tower origin (plate-local) that keeps the tower on the bed, out of every exclusion polygon (with a 2 mm
+ * gap) and 3 mm clear of `occupied` (object footprints). Tries, in order: the back-left and back-right corners
+ * (well away from the X1/P1 front-left chute), the left and right strips back to front, the back strip, the
+ * front strip (right first), then any free spot. null if nothing fits.
+ */
+function findTowerSpot(t: TowerSpec, occupied: Rect[]): { x: number; y: number } | null {
+  if (t.size[0] <= 0) return { x: t.bed.x0 + 15, y: t.bed.y0 + 15 }; // single color: no tower is printed
+  const m = 2, lo = t.brim + 3;
+  const xmin = t.bed.x0 + m + lo, ymin = t.bed.y0 + m + lo;
+  const xmax = t.bed.x1 - m - (t.size[0] - t.brim + 3);
+  const ymax = t.bed.y1 - m - (t.size[1] - t.brim + 3);
+  if (xmax < xmin || ymax < ymin) return null;
+  const fits = (x: number, y: number): boolean => {
+    const r = towerRect(x, y, t);
+    const grown = { x0: r.x0 - 2, y0: r.y0 - 2, x1: r.x1 + 2, y1: r.y1 + 2 };
+    if (t.exclude.some((p) => rectHitsPoly(grown, p))) return false;
+    return !occupied.some((o) => rectsOverlap(r, { x0: o.x0 - 3, y0: o.y0 - 3, x1: o.x1 + 3, y1: o.y1 + 3 }));
+  };
+  const steps = (a: number, b: number, s: number): number[] => {
+    const out: number[] = [];
+    if (a <= b) for (let v = a; v < b; v += s) out.push(v);
+    else for (let v = a; v > b; v -= s) out.push(v);
+    out.push(b);
+    return out;
+  };
+  const cands: Pt[] = [
+    [xmin, ymax], [xmax, ymax],
+    ...steps(ymax, ymin, 2).map((y): Pt => [xmin, y]),
+    ...steps(ymax, ymin, 2).map((y): Pt => [xmax, y]),
+    ...steps(xmin, xmax, 2).map((x): Pt => [x, ymax]),
+    ...steps(xmax, xmin, 2).map((x): Pt => [x, ymin]),
+  ];
+  for (const y of steps(ymax, ymin, 4)) for (const x of steps(xmin, xmax, 4)) cands.push([x, y]);
+  const hit = cands.find(([x, y]) => fits(x, y));
+  const r = (v: number): number => Math.round(v * 100) / 100;
+  return hit ? { x: r(hit[0]), y: r(hit[1]) } : null;
 }
 
 interface Layout {
@@ -552,8 +627,8 @@ const PLATE_GAP = 1.2; // Bambu's plate-grid spacing is 1.2 x bed
  * object to z = 0 and shelf-pack them (reserving the tower strip) across as few plates as needed,
  * laid out on Bambu's plate grid, with per-plate tower positions. Parts within an object never move.
  */
-function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: number, tower: [number, number]): Layout {
-  const towerW = tower[0];
+function layoutObjects(objects: ExportObject[], bed: [number, number], spec: TowerSpec): Layout {
+  const towerW = spec.size[0];
   const trim = (n: number): string => Number(n.toFixed(5)).toString();
   const xform = (tx: number, ty: number, tz: number): string => `1 0 0 0 1 0 0 0 1 ${trim(tx)} ${trim(ty)} ${trim(tz)}`;
   const bounds = objects.map(objectBounds);
@@ -562,8 +637,13 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: nu
   const uMaxX = Math.max(...bounds.map((b) => b.maxX));
   const uMinY = Math.min(...bounds.map((b) => b.minY));
   const uMaxY = Math.max(...bounds.map((b) => b.maxY));
-  const footprint: [number, number] = [uMaxX - uMinX, uMaxY - uMinY];
-  const spot = towerSpot(bed, footprint, exTop, tower);
+  // centred assembled layout: every object's footprint on the plate, for the tower search
+  const tx = bed[0] / 2 - (uMinX + uMaxX) / 2;
+  const ty = bed[1] / 2 - (uMinY + uMaxY) / 2;
+  const keptRects = bounds.map((b) => ({ x0: b.minX + tx, y0: b.minY + ty, x1: b.maxX + tx, y1: b.maxY + ty }));
+  // the assembled layout must fit on the plate itself (5 mm margin) before a tower spot even matters
+  const fitsBed = uMaxX - uMinX <= bed[0] - 10 && uMaxY - uMinY <= bed[1] - 10;
+  const spot = fitsBed ? findTowerSpot(spec, keptRects) : null;
 
   let overlap = false;
   for (let i = 0; i < bounds.length && !overlap; i++)
@@ -574,16 +654,15 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: nu
   const allOnBed = bounds.every((b) => b.minZ - globalMinZ <= 0.5);
 
   if (spot && !overlap && allOnBed) {
-    const tx = bed[0] / 2 - (uMinX + uMaxX) / 2;
-    const ty = bed[1] / 2 - (uMinY + uMaxY) / 2;
     const t = xform(tx, ty, -globalMinZ);
     return { transforms: objects.map(() => t), plates: [{ towerX: spot.x, towerY: spot.y }], objectPlate: objects.map(() => 0), rearranged: false, warnings: [] };
   }
 
   // ---- re-arrange: shelf-pack dropped-to-z0 footprints into plates, reserving the tower strip.
   const gap = 5;
-  const towerY = exTop > 0 ? exTop + 2 : 10;
-  const x0 = towerW > 0 ? 5 + towerW + gap : gap; // objects start right of the tower strip
+  // objects start right of the tower strip, kept free for it. findTowerSpot's margins need x >= size + 11
+  // (origin 2 + brim + 3 in, right edge origin - brim + size + 3, then 3 mm to the objects); +1 slack.
+  const x0 = towerW > 0 ? towerW + 12 : gap;
   const x1 = bed[0] - gap;
   const y0 = gap;
   const y1 = bed[1] - gap;
@@ -598,9 +677,11 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: nu
     const w = bounds[i].maxX - bounds[i].minX;
     const h = bounds[i].maxY - bounds[i].minY;
     if (w > usableW || h > usableH) {
+      // too big to share the plate with the tower strip: a plate of its own, pushed to the back-right so it
+      // stays on the bed and leaves the most room for the tower (the per-plate search below finds it a spot)
       if (plateUsed) newPlate();
-      placed.push({ obj: i, plate, px: x0, py: y0 });
-      tooBig.push(i);
+      placed.push({ obj: i, plate, px: Math.max(gap, Math.min(x0, bed[0] - gap - w)), py: Math.max(gap, bed[1] - gap - h) });
+      if (w > bed[0] - 2 * gap || h > bed[1] - 2 * gap) tooBig.push(i);
       newPlate();
       continue;
     }
@@ -625,13 +706,33 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], exTop: nu
     transforms[pl.obj] = xform(ox + pl.px - b.minX, oy + pl.py - b.minY, -b.minZ);
     objectPlate[pl.obj] = pl.plate;
   }
-  const plates = Array.from({ length: nPlates }, () => ({ towerX: 5, towerY }));
+  // per plate: the first free tower spot around that plate's objects (the reserved left strip always has one
+  // unless an oversized object spills into it); else the old strip spot, with a warning.
+  const exTop = Math.max(0, ...spec.exclude.flat().map((p) => p[1]));
+  const crowded: number[] = [];
+  const plates = Array.from({ length: nPlates }, (_, k) => {
+    const rects = placed
+      .filter((pl) => pl.plate === k)
+      .map((pl) => {
+        const b = bounds[pl.obj];
+        return { x0: pl.px, y0: pl.py, x1: pl.px + b.maxX - b.minX, y1: pl.py + b.maxY - b.minY };
+      });
+    const s = findTowerSpot(spec, rects);
+    if (!s) crowded.push(k + 1);
+    return s ? { towerX: s.x, towerY: s.y } : { towerX: 5, towerY: exTop > 0 ? exTop + spec.brim + 5 : 10 };
+  });
 
   // user-facing (shown as toasts); keep the word "re-arranged", the validator matches on it
   const why = overlap ? 'they overlap when seen from above' : !allOnBed ? 'some of them weren’t resting on the bed' : 'there wasn’t room left for the prime tower';
   const warnings = [
     `Your objects were re-arranged onto ${nPlates} plate${nPlates > 1 ? 's' : ''} because ${why}. Each one now sits flat on the bed.`,
   ];
+  if (towerW > 0 && crowded.length) {
+    warnings.push(
+      `There was no free spot for the prime tower on plate${crowded.length > 1 ? 's' : ''} ${crowded.join(', ')}. ` +
+        'Bambu Studio may report a conflict; drag the tower to a clear spot there.',
+    );
+  }
   if (tooBig.length) {
     const one = tooBig.length === 1;
     warnings.push(
@@ -681,9 +782,13 @@ export async function writeBambuProject(
     tower[0] = Math.max(width + 2 * brim, side);
     tower[1] = Math.max(area / width + walls, side);
   }
-  const exTop = exclusionTop(settings);
+  const area = parsePoly(settings.printable_area);
+  const bedRect: Rect = area.length
+    ? { x0: Math.min(...area.map((p) => p[0])), y0: Math.min(...area.map((p) => p[1])), x1: Math.max(...area.map((p) => p[0])), y1: Math.max(...area.map((p) => p[1])) }
+    : { x0: 0, y0: 0, x1: tmpl.bed[0], y1: tmpl.bed[1] };
+  const spec: TowerSpec = { size: tower, brim: num('prime_tower_brim_width', 3), bed: bedRect, exclude: exclusionPolys(settings) };
 
-  const layout = layoutObjects(objects, tmpl.bed, exTop, tower);
+  const layout = layoutObjects(objects, tmpl.bed, spec);
   const warnings = layout.warnings;
   // per-plate prime-tower positions (one list entry per plate)
   settings.wipe_tower_x = layout.plates.map((p) => String(p.towerX));

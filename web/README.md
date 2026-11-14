@@ -123,6 +123,7 @@ scripts/
   capture-bambu-templates.py  regenerate the Bambu templates from a local Bambu Studio (system presets only)
   validate-bambu.ts           build projects and slice them with the Bambu Studio CLI
   validate-studio-compat.ts   every printer x case, sliced in Bambu Studio 1.10 and 2.8
+  validate-tower.ts           prime tower vs the no-print area, beds and models, every printer x nozzle
   render-gcode.py             top-down G-code render colored by filament (used by the validator)
   presets/                    camo presets: fetch_camos.py (discover) -> build_presets.py (WebP + manifest)
                               -> upload_r2.py (to the R2 bucket); output in git-ignored presets-data/
@@ -138,6 +139,9 @@ Test fixtures live in the git-ignored `scratch/` folder.
   Studios can open the projects. To re-capture, run `scripts/capture-bambu-templates.py` with
   `BAMBU_STUDIO` pointing at a 1.10 binary for the 1.10 printers, and with the installed Studio for the
   rest. `scripts/validate-studio-compat.ts` slices every case in both versions.
+- The prime tower goes where it fits: clear of the printer's no-print area (the X1/P1 purge chute at
+  the front-left) and of the model, preferring a back corner. Its size is estimated from the color
+  count and layer height. If nothing fits, the export warns you.
 
 ## Credits
 

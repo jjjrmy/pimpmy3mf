@@ -767,15 +767,145 @@ def plate_size(machine):
         return 256.0, 256.0
 
 
-def exclude_box(area):
-    """Bounding box ((x0, y0), (x1, y1)) of a bed_exclude_area polygon ['0x0', '18x0', ...], or None."""
-    try:
-        pts = np.array([[float(c) for c in p.split("x")] for p in area])
-    except Exception:
+def parse_poly(v):
+    """A Bambu point list ['0x0', '18x0', ...] as [(x, y), ...]; [] if empty / malformed / < 3 points."""
+    if not isinstance(v, list):
+        return []
+    pts = []
+    for s in v:
+        try:
+            p = [float(c) for c in str(s).split("x")]
+        except ValueError:
+            continue
+        if len(p) == 2 and all(math.isfinite(c) for c in p):
+            pts.append((p[0], p[1]))
+    return pts if len(pts) >= 3 else []
+
+
+def point_in_poly(x, y, poly):
+    inside, j = False, len(poly) - 1
+    for i in range(len(poly)):
+        (xi, yi), (xj, yj) = poly[i], poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def segments_cross(a, b, c, d):
+    def o(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return (v > 0) - (v < 0)
+    return o(a, b, c) != o(a, b, d) and o(c, d, a) != o(c, d, b)
+
+
+def rect_hits_poly(r, poly):
+    """Does the axis-aligned rect (x0, y0, x1, y1) touch the polygon (overlap, containment, crossing edges)?"""
+    x0, y0, x1, y1 = r
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    if any(x0 <= x <= x1 and y0 <= y <= y1 for x, y in poly):
+        return True
+    if any(point_in_poly(x, y, poly) for x, y in corners):
+        return True
+    return any(segments_cross(poly[i], poly[(i + 1) % len(poly)], corners[k], corners[(k + 1) % 4])
+               for i in range(len(poly)) for k in range(4))
+
+
+def tower_spec(machine, process, filament, ncolors):
+    """What the prime tower needs: {'size': [x, y] extent incl. brim from its brim corner ([0, 0] for one
+    color), 'brim', 'bed': printable_area bbox (x0, y0, x1, y1), 'exclude': no-print polygons}.
+    The tower takes prime volume per tool change; area ~ changes/layer x prime volume x 1.5 / layer height.
+    Studio 2.x rib-wall towers are square; 1.10 towers are prime_tower_width wide (measured)."""
+    cfg = {**machine, **filament, **process}
+
+    def num(k, d):
+        v = cfg.get(k)
+        try:
+            f = float(v[0] if isinstance(v, list) else v)
+        except (TypeError, ValueError, IndexError):
+            return d
+        return f if math.isfinite(f) else d
+
+    def max_of(k):
+        v = cfg.get(k)
+        fs = []
+        for x in (v if isinstance(v, list) else [v]):
+            try:
+                fs.append(float(x))
+            except (TypeError, ValueError):
+                pass
+        return max(fs) if fs else 0.0
+
+    brim = num("prime_tower_brim_width", 3)
+    size = [0.0, 0.0]
+    if ncolors > 1:
+        width = num("prime_tower_width", 35)
+        lh = min(num("layer_height", 0.2), num("initial_layer_print_height", 0.2)) or 0.2
+        prime = max(45, max_of("filament_prime_volume"), max_of("prime_volume"))
+        area = (ncolors - 1) * prime * 1.5 / lh
+        walls = 6 + 2 * brim
+        side = math.sqrt(area) + walls + max(0, num("prime_tower_extra_rib_length", 0))
+        size = [max(width + 2 * brim, side), max(area / width + walls, side)]
+    pa = parse_poly(machine.get("printable_area"))
+    bed = ((min(p[0] for p in pa), min(p[1] for p in pa), max(p[0] for p in pa), max(p[1] for p in pa))
+           if pa else (0.0, 0.0, 256.0, 256.0))
+    ex = parse_poly(machine.get("bed_exclude_area"))
+    return {"size": size, "brim": brim, "bed": bed, "exclude": [ex] if ex else []}
+
+
+def tower_rect(x, y, t):
+    """Footprint of a tower whose origin (wipe_tower_x/y) is (x, y), with a 3 mm margin all round.
+    Measured: Studio draws the brim ~3-5 mm left of / below the origin and the body up to size beyond it."""
+    lo = t["brim"] + 3
+    return (x - lo, y - lo, x - t["brim"] + t["size"][0] + 3, y - t["brim"] + t["size"][1] + 3)
+
+
+def find_tower_spot(t, occupied):
+    """Plate-local tower origin (x, y) on the bed, 2 mm clear of every exclusion polygon and 3 mm clear of
+    the occupied rects (x0, y0, x1, y1). Tries the back-left and back-right corners, the left and right
+    strips back to front, the back strip, the front strip (right first), then a grid. None if nothing fits."""
+    bx0, by0, bx1, by1 = t["bed"]
+    if t["size"][0] <= 0:
+        return bx0 + 15, by0 + 15
+    m, lo = 2, t["brim"] + 3
+    xmin, ymin = bx0 + m + lo, by0 + m + lo
+    xmax = bx1 - m - (t["size"][0] - t["brim"] + 3)
+    ymax = by1 - m - (t["size"][1] - t["brim"] + 3)
+    if xmax < xmin or ymax < ymin:
         return None
-    if len(pts) < 3 or np.ptp(pts[:, 0]) <= 0 or np.ptp(pts[:, 1]) <= 0:
-        return None
-    return pts.min(0), pts.max(0)
+
+    def fits(x, y):
+        r = tower_rect(x, y, t)
+        grown = (r[0] - 2, r[1] - 2, r[2] + 2, r[3] + 2)
+        if any(rect_hits_poly(grown, p) for p in t["exclude"]):
+            return False
+        return not any(r[0] < o[2] + 3 and o[0] - 3 < r[2] and r[1] < o[3] + 3 and o[1] - 3 < r[3]
+                       for o in occupied)
+
+    def steps(a, b, s):
+        out, v = [], a
+        if a <= b:
+            while v < b:
+                out.append(v)
+                v += s
+        else:
+            while v > b:
+                out.append(v)
+                v -= s
+        return out + [b]
+
+    cands = [(xmin, ymax), (xmax, ymax)]
+    cands += [(xmin, y) for y in steps(ymax, ymin, 2)] + [(xmax, y) for y in steps(ymax, ymin, 2)]
+    cands += [(x, ymax) for x in steps(xmin, xmax, 2)] + [(x, ymin) for x in steps(xmax, xmin, 2)]
+    cands += [(x, y) for y in steps(ymax, ymin, 4) for x in steps(xmin, xmax, 4)]
+    hit = next((c for c in cands if fits(*c)), None)
+    return (round(hit[0], 2), round(hit[1], 2)) if hit else None
+
+
+def tower_fallback(t):
+    """The old fixed spot, for when no free spot exists (the user moves the tower in Studio)."""
+    top = max((p[1] for poly in t["exclude"] for p in poly), default=0)
+    return 5.0, (top + t["brim"] + 5 if top > 0 else 10.0)
 
 
 def pad_filament_lists(project, binary, filament, n):
@@ -807,11 +937,11 @@ def pad_filament_lists(project, binary, filament, n):
     os.replace(tmp, project)
 
 
-def place_towers(project, pw, pd, tw, td, restore, exclude=None):
-    """After Bambu's arrange, give each plate's prime tower (tw x td mm) a free spot of its own and
-    put back the project settings in restore. Bambu keeps tower positions per plate
-    (wipe_tower_x/y lists). Plates sit in a grid of ceil(sqrt(n)) columns, 1.2 plate sizes apart.
-    Returns the plate numbers that have no free spot."""
+def place_towers(project, pw, pd, spec, restore):
+    """After Bambu's arrange, give each plate's prime tower a free spot of its own (find_tower_spot
+    against that plate's objects and the machine's real exclusion polygons) and put back the project
+    settings in restore. Bambu keeps tower positions per plate (wipe_tower_x/y lists). Plates sit in a
+    grid of ceil(sqrt(n)) columns, 1.2 plate sizes apart. Returns (plate numbers with no free spot, spots)."""
     z = zipfile.ZipFile(project)
     cfg = json.loads(z.read("Metadata/project_settings.config"))
     cfg.update(restore)
@@ -822,20 +952,17 @@ def place_towers(project, pw, pd, tw, td, restore, exclude=None):
         v = np.concatenate([p["v"] for p in o["parts"]])
         boxes[o["id"]] = (v[:, :2].min(0), v[:, :2].max(0))
     cols = math.ceil(math.sqrt(len(plates)))
-    xs, ys, bad = [], [], []
+    xs, ys, bad, spots = [], [], [], []
     for i, ids in enumerate(plates):
         origin = np.array([(i % cols) * pw * 1.2, -(i // cols) * pd * 1.2])
-        local = [(boxes[j][0] - origin - 5, boxes[j][1] - origin + 5) for j in ids if j in boxes]
-        if exclude:
-            local.append((exclude[0] - 5, exclude[1] + 5))
-        spot = next(((x, y) for s in range(0, int(pw + pd), 5) for x in range(5, s + 6, 5)
-                     for y in [5 + s - (x - 5)] if x + tw <= pw - 5 and y + td <= pd - 5
-                     and all(x + tw <= a[0] or x >= b[0] or y + td <= a[1] or y >= b[1] for a, b in local)), None)
+        local = [(*(boxes[j][0] - origin), *(boxes[j][1] - origin)) for j in ids if j in boxes]
+        spot = find_tower_spot(spec, local)
         if spot is None:
             bad.append(i + 1)
-            spot = (5, 10)
-        xs.append(str(spot[0]))
-        ys.append(str(spot[1]))
+            spot = tower_fallback(spec)
+        spots.append(spot)
+        xs.append(f"{spot[0]:g}")
+        ys.append(f"{spot[1]:g}")
     cfg["wipe_tower_x"], cfg["wipe_tower_y"] = xs, ys
     tmp = project + ".tmp"
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
@@ -846,7 +973,7 @@ def place_towers(project, pw, pd, tw, td, restore, exclude=None):
             out.writestr(info, data)
     z.close()
     os.replace(tmp, project)
-    return bad
+    return bad, spots
 
 
 def fill_from_installed(objects, project, hexes, args, binary, say):
@@ -945,56 +1072,73 @@ def bambu_project(objects, out_3mf, hexes, args, binary=None, quiet=False):
     lo = np.min([b[0] for b in boxes], 0)
     hi = np.max([b[1] for b in boxes], 0)
     footprint = hi[:2] - lo[:2]
-    # Prime tower: Bambu's default spot (back-left, y=220) runs off the bed once 3-4 colors make
-    # the tower ~40 mm deep. The model gets centered, so put the tower in the free strip to its
-    # left (growing toward the back), else in front of it.
+    # Prime tower: a free spot on the bed, clear of the objects and of the machine's exclusion area
+    # (X1/P1: the purge-chute corner at the front-left), searched over the centered layout.
     multi = len(hexes) > 1
-    tower = float(process.get("prime_tower_width", 35)) + 2 * float(process.get("prime_tower_brim_width", 3))
+    spec = tower_spec(machine, process, filament, len(hexes))
+    center = np.array([pw / 2 - (lo[0] + hi[0]) / 2, pd / 2 - (lo[1] + hi[1]) / 2, -lo[2]])
 
-    # X1/P1 beds have a front-left exclude area (the cutter); a tower touching it fails to slice.
-    ex = exclude_box(machine.get("bed_exclude_area", []))
-    left_y = max(10.0, ex[1][1] + 5) if ex else 10.0
-    front_x = max(5.0, ex[1][0] + 5) if ex else 5.0
+    def search(off):
+        return find_tower_spot(spec, [(b[0][0] + off[0], b[0][1] + off[1], b[1][0] + off[0], b[1][1] + off[1])
+                                      for b in boxes])
 
-    def tower_spot(fp):
-        left, front = (pw - fp[0]) / 2 - 5, (pd - fp[1]) / 2 - 5
-        return ("5", f"{left_y:g}") if left >= tower + 3 else (f"{front_x:g}", "5") if front >= 40 else None
-
-    # Several objects: keep their layout (centered on the plate) when it is printable as is: they
-    # fit next to the prime tower, don't overlap from above and all stand on the bed. Otherwise
-    # (an assembly stacked in place, a multi-plate project) Bambu arranges them; each object
-    # carries its own color modifiers, so the paint moves with it.
-    offset, arrange, note, fp = np.zeros(3), "1", "", footprint
+    # Kept layout: the objects, centered on the plate, are printable as they are: they fit next to
+    # the prime tower, don't overlap from above and all stand on the bed. Otherwise (an assembly
+    # stacked in place, a multi-plate project) Bambu arranges them; each object carries its own
+    # color modifiers, so the paint moves with it. A single object is always kept.
+    offset, arrange, note, spot, moved = center, "0", "", None, ""
+    keepable = True
     if len(objects) > 1:
         overlap = any(np.all(np.minimum(a[1][:2], b[1][:2]) - np.maximum(a[0][:2], b[0][:2]) > 0.01)
                       for i, a in enumerate(boxes) for b in boxes[i + 1:])
         grounded = all(b[0][2] - lo[2] < 0.01 for b in boxes)
-        fits = footprint[0] <= pw - 10 and footprint[1] <= pd - 10 and (not multi or tower_spot(footprint))
-        if fits and not overlap and grounded:
-            offset = np.array([pw / 2 - (lo[0] + hi[0]) / 2, pd / 2 - (lo[1] + hi[1]) / 2, -lo[2]])
-            arrange, note = "0", "layout kept"
+        keepable = footprint[0] <= pw - 10 and footprint[1] <= pd - 10 and not overlap and grounded
+    if multi and keepable:
+        spot = search(center)
+        if not spot:
+            # no room when centered: slide the whole group right (then also back / front) and retry
+            rx = pw - 5 - hi[0]
+            for off, where in ((np.array([rx, center[1], center[2]]), "right"),
+                               (np.array([rx, pd - 5 - hi[1], center[2]]), "right and back"),
+                               (np.array([rx, 5 - lo[1], center[2]]), "right and front")):
+                spot = search(off)
+                if spot:
+                    offset, moved = off, f"model moved {where} to make room for the prime tower"
+                    break
+    if len(objects) > 1:
+        if keepable and (not multi or spot):
+            note = "layout kept"
         else:
             why = ("they overlap from above" if overlap else "some don't sit on the bed" if not grounded
                    else "they don't fit on one plate as laid out")
-            arrange, note = "1", f"re-arranged by Bambu Studio: {why}"
-            fp = np.max([b[1][:2] - b[0][:2] for b in boxes], 0)     # every plate holds the largest
-    if multi:
-        spot = tower_spot(fp)
-        if spot:
-            process["wipe_tower_x"], process["wipe_tower_y"] = [spot[0]], [spot[1]]
-        else:
-            say(f"note: at {fp[0]:.0f} x {fp[1]:.0f} mm there is no free strip on the "
+            offset, arrange, note = np.zeros(3), "1", f"re-arranged by Bambu Studio: {why}"
+    if multi and arrange == "0":
+        if not spot:
+            spot = tower_fallback(spec)
+            say(f"note: at {footprint[0]:.0f} x {footprint[1]:.0f} mm there is no free strip on the "
                 f"{pw:.0f} mm bed for the prime tower; move it in Bambu Studio or use a smaller --size")
+        elif moved:
+            say(f"note: {moved}")
+        process["wipe_tower_x"], process["wipe_tower_y"] = [f"{spot[0]:g}"], [f"{spot[1]:g}"]
+        note = "; ".join(x for x in (note, moved, f"prime tower at ({spot[0]:g}, {spot[1]:g})") if x)
     # Bambu's arrange packs plates edge to edge and ignores the prime tower; while it arranges,
-    # fence off the front-left corner (bed exclude area) so every plate keeps room for one.
-    tower_d = 15 + 10 * len(hexes)
-    fence = multi and arrange == "1" and len(objects) > 1
+    # fence off a full-depth strip at the left (covering the exclusion area) so every plate keeps
+    # room for one; place_towers then finds each plate's real spot.
+    fence = multi and arrange == "1"
     keep_exclude = machine.get("bed_exclude_area", [])
     if fence:
-        fx, fy = 5 + tower + 5, left_y + tower_d + 5
-        if ex:
-            fx, fy = max(fx, ex[1][0]), max(fy, ex[1][1])
-        machine["bed_exclude_area"] = ["0x0", f"{fx:g}x0", f"{fx:g}x{fy:g}", f"0x{fy:g}"]
+        fx, fy = spec["size"][0] + 12, pd     # tower origin >= brim+5 in, 3 mm gap to objects
+        for poly in spec["exclude"]:
+            fx, fy = max(fx, max(p[0] for p in poly)), max(fy, max(p[1] for p in poly))
+        widest = max(min(b[1][0] - b[0][0], b[1][1] - b[0][1]) for b in boxes)
+        if widest > pw - fx - 5:
+            # an object too big to sit beside the strip would be pushed off the plate; let Bambu
+            # use the whole plate (place_towers then reports the plates with no tower spot)
+            fence = False
+            say("note: an object is too large to leave a prime-tower strip beside it; "
+                "Bambu Studio arranges on the full plate")
+        else:
+            machine["bed_exclude_area"] = ["0x0", f"{fx:g}x0", f"{fx:g}x{fy:g}", f"0x{fy:g}"]
     with tempfile.TemporaryDirectory() as tmp:
         plain = f"{tmp}/plain.3mf"
         write_3mf(plain, objects, offset)
@@ -1024,8 +1168,9 @@ def bambu_project(objects, out_3mf, hexes, args, binary=None, quiet=False):
             return None
     pad_filament_lists(out_abs, binary, filament, len(hexes))
     fill_from_installed(objects, out_abs, hexes, orig_args, binary, say)
-    if fence:
-        bad = place_towers(out_abs, pw, pd, tower, tower_d, {"bed_exclude_area": keep_exclude}, ex)
+    if multi and arrange == "1":
+        bad, spots = place_towers(out_abs, pw, pd, spec, {"bed_exclude_area": keep_exclude})
+        note += "; prime tower at " + ", ".join(f"({x:g}, {y:g})" for x, y in spots)
         if bad:
             say(f"note: no free spot for the prime tower on plate {', '.join(map(str, bad))}; "
                 f"move it in Bambu Studio")
