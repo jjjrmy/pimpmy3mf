@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Axis, Params, Projection, Result } from '../core/types';
 import { Slider } from './Slider';
+import { Icon } from './Icons';
 
 /** What the UI knows about a loaded model: its name, size and object/part structure. */
 export interface ModelSummary {
@@ -115,7 +116,7 @@ function PaintedFaces(props: DesignTabProps) {
                   </span>
                   <span className="face-area">{f.area.toFixed(1)} mm²</span>
                   <button type="button" className="icon-x" aria-label={`Remove face ${i + 1}`} title="Remove" onClick={() => onRemoveFace(f.id)}>
-                    ✕
+                    <Icon name="close" />
                   </button>
                 </li>
               );
@@ -134,8 +135,8 @@ const DEPTH_MIN = 0.2;
 const DEPTH_STEP = 0.1;
 const DEPTH_MAX = 5;
 
-/** Pattern depth: 0.2 mm steps up to 5 mm (or just under the thickness in tile mode), plus a Full notch. */
-function PatternDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' | 'mode' | 'onParams'>) {
+/** Paint depth: 0.2 mm steps up to 5 mm (or just under the thickness in tile mode), plus a Full notch. */
+function PaintDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' | 'mode' | 'onParams'>) {
   const tile = mode === 'image';
   // tile mode: the last step strictly below the thickness; anything at or above it is Full
   const max = tile
@@ -146,13 +147,15 @@ function PatternDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' 
   const shown = isFull ? max : Number(depth.toFixed(2));
   const set = (v: number) => onParams({ depth: tile && v >= params.thickness ? null : Number(v.toFixed(2)) });
   const hint = isFull
-    ? 'The pattern goes all the way through.'
+    ? 'The colors go all the way through.'
     : tile
-      ? `Top ${shown} mm is the pattern, on a solid color-1 base.`
-      : `Only the outer ${shown} mm is colored; the inside prints in color 1.`;
+      ? `Top ${shown} mm is colored, on a solid color-1 base.`
+      : params.paintInside
+        ? `Only the outer ${shown} mm is colored, holes and bores included; the inside prints in color 1.`
+        : `Only the outer ${shown} mm of the outside surfaces is colored; holes, bores and the inside print in color 1.`;
   return (
     <section className="control-group">
-      <h3 className="tab-subhead">Pattern depth</h3>
+      <h3 className="tab-subhead">Paint depth</h3>
       <Slider
         label="Depth"
         unit="mm"
@@ -161,8 +164,15 @@ function PatternDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' 
         step={DEPTH_STEP}
         value={shown}
         full={{ label: 'Full', active: isFull, onSelect: () => onParams({ depth: null }) }}
+        commitOnRelease
         onChange={set}
       />
+      {!tile && !isFull && (
+        <label className="toggle toggle-inline">
+          <input type="checkbox" checked={params.paintInside} onChange={(e) => onParams({ paintInside: e.target.checked })} />
+          <span>Paint inside surfaces</span>
+        </label>
+      )}
       <p className="hint">{hint}</p>
     </section>
   );
@@ -303,8 +313,8 @@ export function DesignTab(props: DesignTabProps) {
         </button>
       </section>
 
-      {/* ---- pattern depth ---- */}
-      <PatternDepth params={params} mode={mode} onParams={onParams} />
+      {/* ---- paint depth ---- */}
+      <PaintDepth params={params} mode={mode} onParams={onParams} />
 
       {/* ---- painted faces (paint mode) ---- */}
       {mode === 'paint' && model && <PaintedFaces {...props} />}
@@ -317,7 +327,7 @@ export function DesignTab(props: DesignTabProps) {
         )}
         <Slider label="Edge smoothing" unit="px" min={0} max={4} step={0.5} value={params.smooth} onChange={(v) => onParams({ smooth: v })} />
         <Slider label="Min feature" unit="mm" min={0} max={2} step={0.1} value={params.minFeature} onChange={(v) => onParams({ minFeature: v })} />
-        <Slider label="Resolution" unit="mm" min={0.05} max={0.3} step={0.01} value={params.resolution} onChange={(v) => onParams({ resolution: v })} />
+        <Slider label="Resolution" unit="mm" min={0.05} max={0.3} step={0.01} value={params.resolution} commitOnRelease onChange={(v) => onParams({ resolution: v })} />
       </details>
     </div>
   );

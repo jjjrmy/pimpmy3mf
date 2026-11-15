@@ -355,6 +355,10 @@ body {
 }
 
 .icon-x {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 14px;
   border: 2px solid rgba(255, 255, 255, 0.3);
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
@@ -983,9 +987,26 @@ input[type='color'] {
   color: #fff;
   box-shadow: 0 2px 0 var(--panel-edge), inset 0 0 0 1px rgba(255, 255, 255, 0.3);
 }
+/* the plain hover rule outranks .is-active, which turned an active tool pale yellow with white text */
+.vtool.is-active:hover:not(:disabled) {
+  background: var(--panel-2);
+  filter: brightness(1.1);
+}
 .vtool-icon {
-  font-size: 15px;
+  display: inline-flex;
+  font-size: 16px;
   line-height: 1;
+}
+/* shared SVG icon (ui/Icons.tsx): 1em square, sits on the text baseline */
+.icon {
+  display: inline-block;
+  flex: none;
+  vertical-align: -0.14em;
+}
+.status > .icon,
+.btn-ghost > .icon,
+.segmented button > .icon {
+  margin-right: 1px;
 }
 .vtool-sub {
   display: flex;
@@ -1043,7 +1064,7 @@ input[type='color'] {
   place-items: center;
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1;
 }
 
@@ -1516,13 +1537,16 @@ input[type='color'] {
   color: var(--text-dim);
 }
 .suggest-arrow {
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 2px solid rgba(255, 255, 255, 0.3);
   background: rgba(255, 255, 255, 0.1);
   color: var(--text);
   border-radius: 7px;
   width: 24px;
   height: 24px;
-  font-size: 10px;
+  font-size: 14px;
   cursor: pointer;
   flex: none;
 }
@@ -2042,6 +2066,8 @@ input[type='color'] {
   word-break: break-word;
 }
 .toast-close {
+  display: grid;
+  place-items: center;
   flex: none;
   border: none;
   background: transparent;

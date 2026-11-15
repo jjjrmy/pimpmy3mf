@@ -59,6 +59,7 @@ function buildParams(a: Record<string, string>): Params {
     paintedFaces: [],
     textures: [],
     depth: a.depth != null && a.depth !== 'full' ? parseFloat(a.depth) : null,
+    paintInside: 'paint-inside' in a,
   };
 }
 

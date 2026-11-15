@@ -1,4 +1,4 @@
-// Pattern-depth validator. Builds each case through the REAL pipeline + objectsFromResult + writeBambuProject,
+// Paint-depth validator. Builds each case through the REAL pipeline + objectsFromResult + writeBambuProject,
 // checks the meshes (manifold status, pairwise color overlap), slices with the Bambu CLIs (no settings flags)
 // and inspects the G-code: which tools extrude per FEATURE on a mid layer, tool changes / flush / filament / time
 // vs Full, and the image-mode base/cap layering. Also times the shell build (and the Yeti part, pipeline only).

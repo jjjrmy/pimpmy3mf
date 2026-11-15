@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import type { PresetItem, PresetManifest } from '../shared/presets';
 import type { ModelSummary } from './DesignTab';
+import { Icon } from './Icons';
 
 const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.bmp,image/*';
 const MODEL_ACCEPT = '.stl,.3mf,.obj';
@@ -48,7 +49,7 @@ export function PaintTab(props: PaintTabProps) {
         {model ? (
           <div className="model-row">
             <div className="model-icon" aria-hidden>
-              ◆
+              <Icon name="cube" />
             </div>
             <div className="model-meta">
               <div className="model-name" title={model.name}>
@@ -61,7 +62,7 @@ export function PaintTab(props: PaintTabProps) {
               </div>
             </div>
             <button type="button" className="icon-x" title="Remove model" aria-label="Remove model" onClick={props.onClearModel}>
-              ✕
+              <Icon name="close" />
             </button>
           </div>
         ) : (

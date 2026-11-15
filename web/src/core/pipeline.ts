@@ -170,6 +170,7 @@ export function createPipeline(): Pipeline {
   // depth stage (between 3 and 4): shell-clipped modifiers (paint) / base + caps (image)
   const shellCache = new ShellCache();
   let dKey = ''; let dRegions: ColorRegion[] | null = null; let dBase: Mesh | null = null;
+  let dInner: (Uint32Array | null)[][] | null = null;
 
   const run = async (image: RasterImage, srcModel: Model | null, params: Params, opts?: RunOptions): Promise<Result> => {
     const t0 = performance.now();
@@ -321,18 +322,21 @@ export function createPipeline(): Pipeline {
       eRegions = regions; eKey = e3Key;
     }
 
-    // ---- stage 3b: pattern depth. Paint: clip every modifier to the parts' outer shell. Image: base + caps ----
+    // ---- stage 3b: paint depth. Paint: clip every modifier to the parts' outer shell. Image: base + caps ----
     const want = params.depth != null && Number.isFinite(params.depth) && params.depth > 0 ? params.depth : null;
     const depth = geom.mode === 'image' ? (want != null && want < params.thickness ? want : null) : want;
-    const d3Key = `${e3Key}|${depth ?? 'F'}`;
+    const inside = geom.mode === 'paint' && depth != null && !!params.paintInside;
+    const d3Key = `${e3Key}|${depth ?? 'F'}|${inside ? 'in' : 'out'}`;
     if (dKey !== d3Key || !dRegions) {
+      dInner = null;
       if (depth == null) {
         dRegions = eRegions!; dBase = null;
       } else if (geom.mode === 'paint' && model) {
-        const shells = shellCache.get(model, depth)
-          ?? await shellCache.build(wasm, model, depth, (done, total) => tick('shell', total ? done / total : undefined));
+        const set = shellCache.get(model, depth, inside)
+          ?? await shellCache.build(wasm, model, depth, inside, (done, total) => tick('shell', total ? done / total : undefined));
         await tick('shell', 1);
-        dRegions = clipRegionsToShells(wasm, eRegions!, shells); dBase = null;
+        dRegions = clipRegionsToShells(wasm, eRegions!, set.shells); dBase = null;
+        dInner = set.inner.some((row) => row.some((r) => !!r)) ? set.inner : null;
       } else {
         const sp = splitTile(wasm, eRegions!, params.thickness, depth);
         dRegions = sp.regions; dBase = sp.base;
@@ -379,6 +383,7 @@ export function createPipeline(): Pipeline {
       model: geom.mode === 'paint' ? origModel : null,
       faceSkins: sSkins.map((k) => ({ ...k, mesh: cloneMesh(k.mesh)! })),
       depth,
+      innerFaces: dInner ? dInner.map((row) => row.map((r) => (r ? r.slice() : null))) : null,
       base: cloneMesh(dBase),
       shaped: geom.mode === 'paint' && tChanged && model
         ? model.objects.map((o, j) => o.parts.map((p, k) => (tChanged![j]?.[k] ? cloneMesh(p.mesh) : null)))
@@ -393,7 +398,7 @@ export function createPipeline(): Pipeline {
     qKey = ''; gKey = ''; eKey = '';
     oSrc = null; oModel = null; oOrig = null; oKey = '';
     tIn = null; tSrc = null; tKey = ''; tChanged = null; tApplied = []; tWarn = []; sRegions = null; sSkins = []; sKey = '';
-    shellCache.clear(); dRegions = null; dBase = null; dKey = '';
+    shellCache.clear(); dRegions = null; dBase = null; dInner = null; dKey = '';
     void gGeom; void gColors;
   };
 

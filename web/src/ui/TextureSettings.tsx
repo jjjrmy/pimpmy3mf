@@ -17,14 +17,14 @@ export const DEFAULT_TEXTURE_SETTINGS: TextureSettings = {
   rotation: 0,
 };
 
-export const BUILTIN_PATTERNS: { value: BuiltinPattern; label: string; icon: string }[] = [
-  { value: 'knurl', label: 'Diamond knurl', icon: '◈' },
-  { value: 'stipple', label: 'Stipple / dots', icon: '⠿' },
-  { value: 'ridges', label: 'Ridges / lines', icon: '≡' },
-  { value: 'hex', label: 'Hex', icon: '⬡' },
+export const BUILTIN_PATTERNS: { value: BuiltinPattern; label: string }[] = [
+  { value: 'knurl', label: 'Diamond knurl' },
+  { value: 'stipple', label: 'Stipple / dots' },
+  { value: 'ridges', label: 'Ridges / lines' },
+  { value: 'hex', label: 'Hex' },
 ];
 
-const IMAGE_INFO = { value: 'image' as const, label: 'Custom image', icon: '▣' };
+const IMAGE_INFO = { value: 'image' as const, label: 'Custom image' };
 
 export function patternInfo(p: TexturePattern) {
   return p === 'image' ? IMAGE_INFO : (BUILTIN_PATTERNS.find((x) => x.value === p) ?? BUILTIN_PATTERNS[0]);
@@ -78,7 +78,7 @@ export function TextureSettingsForm({ pattern, value, onChange }: TextureSetting
         </button>
       </div>
 
-      <Slider label="Height" unit="mm" min={0.2} max={1.5} step={0.05} value={value.height} onChange={(v) => onChange({ height: Number(v.toFixed(2)) })} />
+      <Slider label="Height" unit="mm" min={0.2} max={1.5} step={0.05} value={value.height} commitOnRelease onChange={(v) => onChange({ height: Number(v.toFixed(2)) })} />
       <Slider
         label={isImage ? 'Tile size' : 'Pitch'}
         unit="mm"
@@ -86,6 +86,7 @@ export function TextureSettingsForm({ pattern, value, onChange }: TextureSetting
         max={20}
         step={0.1}
         value={value.pitch}
+        commitOnRelease
         onChange={(v) => onChange({ pitch: Number(v.toFixed(2)) })}
       />
       {pattern !== 'stipple' && (
@@ -96,6 +97,7 @@ export function TextureSettingsForm({ pattern, value, onChange }: TextureSetting
           max={180}
           step={1}
           value={value.rotation}
+          commitOnRelease
           onChange={(v) => onChange({ rotation: v })}
         />
       )}

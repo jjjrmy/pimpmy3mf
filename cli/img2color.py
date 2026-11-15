@@ -1273,7 +1273,7 @@ def main():
                     "With --apply-to: tile size (texture repeats); omit to stretch one copy over the model")
     ap.add_argument("-t", "--thickness", type=float, default=2.0, help="image mode: extrusion height in mm (default 2)")
     ap.add_argument("--depth", default="full", metavar="MM",
-                    help="pattern depth: color only an outer skin this many mm deep (paint: a shell "
+                    help="paint depth: color only an outer skin this many mm deep (paint: a shell "
                          "inside the model's surface; image: the top MM of the tile over a one-color "
                          "base). Default: full")
     ap.add_argument("--smooth", type=float, default=1.0,
@@ -1698,7 +1698,7 @@ def main():
             f.write(f"# painted onto {model['path'].name} ({structure}, {split}); filament 1 = the model, "
                     f"others = modifiers ({how})\n")
         if depth is not None:
-            f.write(f"# pattern depth {depth:g} mm: " + ("an outer shell of the model is colored\n" if model is not None
+            f.write(f"# paint depth {depth:g} mm: " + ("an outer shell of the model is colored\n" if model is not None
                     else "filament 1 is a full-thickness base, the others color only its top\n"))
         f.write("filament  hex      coverage  file\n")
         for k, fname in rows:
@@ -1713,7 +1713,7 @@ def main():
         + (f" stretched over {mpath.name}" if model is not None and not cyl and not tile else "")
         + (f", rotated {args.rotate:g}°" if args.rotate else "")
         + (f", offset {dx:g},{dy:g} mm" if dx or dy else "")
-        + (f", pattern depth {depth:g} mm" if depth is not None else "")
+        + (f", paint depth {depth:g} mm" if depth is not None else "")
         + f", grid {nx}x{ny} @ {qx:.3f} mm")
     if model is not None:
         log(f"  model: {structure}, {split}")

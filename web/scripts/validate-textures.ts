@@ -415,7 +415,7 @@ function checkCase(c: Case, b: Built): void {
     const S = toMan(shaped, true), O = toMan(orig, true);
     const raised = texs.some((t) => t.mode === 'raised');
     // raised: the relief (shaped − original) must be colored; recessed: the shaped part must be colored where the
-    // modifiers reach (Full depth: everything; pattern depth: compare against the shell volume the modifiers fill)
+    // modifiers reach (Full depth: everything; paint depth: compare against the shell volume the modifiers fill)
     const probe = raised ? S.subtract(O) : S;
     const pv = probe.volume();
     const I = probe.intersect(U);

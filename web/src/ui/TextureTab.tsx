@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import type { FaceTexture } from '../core/types';
 import type { ModelSummary } from './DesignTab';
 import { heightMapUrl } from './heightmap';
+import { Icon } from './Icons';
 import type { LibraryPattern, PatternLibrary } from './patternLibrary';
 import { builtinThumbUrl } from './patternThumbs';
 import {
@@ -73,7 +74,7 @@ function PatternSelect({ t, library, deleted, onChange }: { t: FaceTexture; libr
         {!listed && <option value={current}>{textureLabel(t, deleted)}</option>}
         {BUILTIN_PATTERNS.map((p) => (
           <option key={p.value} value={p.value}>
-            {p.icon} {p.label}
+            {p.label}
           </option>
         ))}
         {library.length > 0 && (
@@ -235,7 +236,7 @@ export function TextureTab(props: TextureTabProps) {
                       title="Rename"
                       onClick={() => setRenaming({ id: p.id, draft: p.name })}
                     >
-                      ✎
+                      <Icon name="edit" />
                     </button>
                     <button
                       type="button"
@@ -244,7 +245,7 @@ export function TextureTab(props: TextureTabProps) {
                       title="Delete from library (textured areas keep it)"
                       onClick={() => props.onDeletePattern(p.id)}
                     >
-                      ✕
+                      <Icon name="close" />
                     </button>
                   </div>
                 </div>
@@ -300,7 +301,7 @@ export function TextureTab(props: TextureTabProps) {
           <>
             {props.toolAvailable && !props.toolActive && (
               <button type="button" className="btn-ghost tex-start" onClick={props.onActivateTool}>
-                ◈ Texture a face
+                <Icon name="texture" /> Texture a face
               </button>
             )}
             {textures.length === 0 ? (
@@ -324,7 +325,7 @@ export function TextureTab(props: TextureTabProps) {
                             title="Use this pattern for the next area"
                             onClick={() => props.onReusePattern(t)}
                           >
-                            {thumb ? <img src={thumb} alt="" /> : '▣'}
+                            {thumb ? <img src={thumb} alt="" /> : <Icon name="texture" />}
                           </button>
                           <span className="face-label">
                             <span title={label}>{label}</span>
@@ -346,7 +347,7 @@ export function TextureTab(props: TextureTabProps) {
                             title={open ? 'Done' : 'Edit'}
                             onClick={() => setEditing(open ? null : t.id)}
                           >
-                            ✎
+                            <Icon name="edit" />
                           </button>
                           <button
                             type="button"
@@ -355,7 +356,7 @@ export function TextureTab(props: TextureTabProps) {
                             title="Remove"
                             onClick={() => props.onTextures(textures.filter((x) => x.id !== t.id))}
                           >
-                            ✕
+                            <Icon name="close" />
                           </button>
                         </div>
                         {open && (

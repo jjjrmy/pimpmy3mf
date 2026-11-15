@@ -3,6 +3,8 @@
 // the active tool, hover highlighting and picking live in Viewer3D / App. The Texture face tool's settings
 // live in the TEXTURE tab; here it only has the Add / Eraser toggle.
 
+import { Icon } from './Icons';
+
 export type ViewportTool = 'lay' | 'paint' | 'texture';
 
 interface ViewportToolsProps {
@@ -49,7 +51,7 @@ export function ViewportTools({
         title="Lay a face flat on the bed"
       >
         <span className="vtool-icon" aria-hidden>
-          ⬓
+          <Icon name="lay" />
         </span>
         <span className="vtool-label">Lay on face</span>
       </button>
@@ -61,7 +63,7 @@ export function ViewportTools({
         title="Paint a face in one color"
       >
         <span className="vtool-icon" aria-hidden>
-          🖌
+          <Icon name="brush" />
         </span>
         <span className="vtool-label">Paint face</span>
       </button>
@@ -87,7 +89,7 @@ export function ViewportTools({
             aria-pressed={brush === null}
             onClick={() => onBrush(null)}
           >
-            ⌫
+            <Icon name="eraser" />
           </button>
         </div>
       )}
@@ -99,7 +101,7 @@ export function ViewportTools({
         title="Add a grip texture (real surface relief) to a face"
       >
         <span className="vtool-icon" aria-hidden>
-          ◈
+          <Icon name="texture" />
         </span>
         <span className="vtool-label">Texture face</span>
       </button>
@@ -110,7 +112,7 @@ export function ViewportTools({
               Add
             </button>
             <button type="button" className={textureErase ? 'is-active' : ''} aria-pressed={textureErase} onClick={() => onTextureErase(true)}>
-              ⌫ Eraser
+              <Icon name="eraser" /> Eraser
             </button>
           </div>
           <p className="hint tex-hint">{textureErase ? 'Click or drag over a textured face to remove it.' : 'Pattern & settings: Texture tab.'}</p>

@@ -77,6 +77,8 @@ interface Scene {
   faceMeshes: Map<string, THREE.Mesh>;
   /** Paint mode: translucent face-skin modifiers (shown with Show modifier prisms). */
   skinMeshes: { mesh: THREE.Mesh; faceId: string; key: string; color: number }[];
+  /** Hole / bore walls that print in filament 1 under a paint depth, drawn over the camo in color 1. */
+  innerMeshes: { mesh: THREE.Mesh; key: string }[];
   /** Transient preview overlays for the brush stroke in progress. */
   strokeMeshes: THREE.Mesh[];
   /** Transient hover highlight for the active tool. */
@@ -361,6 +363,7 @@ export function Viewer3D({
       pickMeshes: new Map(),
       faceMeshes: new Map(),
       skinMeshes: [],
+      innerMeshes: [],
       strokeMeshes: [],
       highlight: null,
       texture: null,
@@ -449,6 +452,7 @@ export function Viewer3D({
     b.pickMeshes.clear();
     b.faceMeshes.clear(); // meshes disposed with the group; the painted-overlay effect rebuilds them
     b.skinMeshes = [];
+    b.innerMeshes = [];
     b.strokeMeshes = []; // stroke previews disposed with the group
     b.highlight = null; // disposed with the group
     b.texture?.dispose();
@@ -504,6 +508,30 @@ export function Viewer3D({
           } else {
             b.pickMeshes.set(key, mesh);
           }
+        });
+      });
+
+      // paint depth (outside surfaces only): hole and bore walls print in filament 1, so show them that way.
+      // Painted-face overlays sit closer (larger polygon offset) and win where both apply.
+      result.innerFaces?.forEach((row, j) => {
+        row.forEach((tris, k) => {
+          const p = result.model!.objects[j]?.parts[k];
+          if (!tris || !p) return;
+          const key = `${j}:${k}`;
+          const mesh = new THREE.Mesh(
+            subGeometry(result.shaped?.[j]?.[k] ?? p.mesh, Array.from(tris)),
+            new THREE.MeshStandardMaterial({
+              color: new THREE.Color(hexes[0] ?? result.regions[0]?.hex ?? '#cccccc'),
+              roughness: 0.6,
+              metalness: 0.05,
+              polygonOffset: true,
+              polygonOffsetFactor: -0.5,
+              polygonOffsetUnits: -0.5,
+            }),
+          );
+          mesh.visible = !hiddenParts.has(key);
+          b.innerMeshes.push({ mesh, key });
+          b.objectGroup.add(mesh);
         });
       });
 
@@ -648,6 +676,10 @@ export function Viewer3D({
       for (const s of b.skinMeshes) {
         (s.mesh.material as THREE.MeshStandardMaterial).color.set(clampedColor(s.color, hexes, result));
         s.mesh.visible = showModifiers && !hiddenParts.has(s.key);
+      }
+      for (const m of b.innerMeshes) {
+        (m.mesh.material as THREE.MeshStandardMaterial).color.set(hexes[0] ?? result.regions[0]?.hex ?? '#cccccc');
+        m.mesh.visible = !hiddenParts.has(m.key);
       }
     }
   }, [hexes, hidden, hiddenParts, showModifiers, result, paintedFaces]);

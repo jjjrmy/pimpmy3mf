@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { Icon, type IconName } from './Icons';
 
 export type ToastKind = 'warning' | 'error' | 'success' | 'info';
 
@@ -14,7 +15,7 @@ interface ToastItem extends ToastInput {
 
 /** How long each kind stays before auto-dismiss (errors stay until closed). */
 const DURATION: Record<ToastKind, number> = { warning: 8000, error: Infinity, success: 3000, info: 5000 };
-const ICON: Record<ToastKind, string> = { warning: '⚠', error: '⛔', success: '✓', info: 'ℹ' };
+const ICON: Record<ToastKind, IconName> = { warning: 'warning', error: 'error', success: 'check', info: 'info' };
 const MAX_VISIBLE = 3;
 
 const ToastContext = createContext<(t: ToastInput) => void>(() => {});
@@ -85,14 +86,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             onMouseLeave={() => arm(t.id, t.kind)}
           >
             <span className="toast-icon" aria-hidden>
-              {ICON[t.kind]}
+              <Icon name={ICON[t.kind]} />
             </span>
             <div className="toast-body">
               <div className="toast-title">{t.title}</div>
               {t.message && <div className="toast-msg">{t.message}</div>}
             </div>
             <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => dismiss(t.id)}>
-              ✕
+              <Icon name="close" />
             </button>
           </div>
         ))}

@@ -63,9 +63,15 @@ Both use the same algorithm.
   - Without the R2 binding or data (forks, `vite dev`), the picker simply doesn't show.
 - **Pattern rotation and offset** in both modes. The pattern wraps, so nothing is ever left
   uncovered.
-- **Pattern depth** in both modes, in the web app and the CLI (`--depth MM`; default full). On a
+- **Paint depth** in both modes, in the web app and the CLI (`--depth MM`; default full). On a
   painted model only an outer shell that deep is colored, so the core prints in filament 1. On an
   image tile the colors fill only its top over a one-color base, and it prints as one piece.
+  - Only the outside surfaces are shelled. Bores, through-holes, blind holes and sealed cavities print in
+    filament 1. A hole is a pocket of (convex hull − part) whose mouth on the hull is under half the area
+    of its walls; an open inside corner or a finger groove stays an outside surface. **Paint inside
+    surfaces** shells them too (`scripts/validate-inner.ts` checks both).
+  - The heavy sliders (paint depth, resolution, texture height / pitch / rotation) regenerate when you let
+    go. A run stuck behind a long shell or texture build is stopped by replacing the worker.
 - **Filament suggestions:** ◀ ▶ through real filaments for each color, from two merged catalogs:
   [filamentcolors.xyz](https://filamentcolors.xyz) (lab-**measured** colors) and
   [SpoolmanDB](https://github.com/Donkie/SpoolmanDB) (manufacturer-listed **maker** colors). Each

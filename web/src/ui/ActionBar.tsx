@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PrinterPreset } from '../core/types';
 import type { ExportKind } from '../worker/messages';
+import { Icon } from './Icons';
 
 interface ActionBarProps {
   /** No result yet: every export is disabled. */
@@ -107,7 +108,7 @@ export function ActionBar(props: ActionBarProps) {
               onClick={bambu.toggle}
             >
               {busy === 'bambu-3mf' ? 'Preparing…' : 'Bambu .3mf'}
-              <span className="pill-sub">{current.printer.replace(/^Bambu Lab /, '')} · {current.nozzle} mm ▾</span>
+              <span className="pill-sub">{current.printer.replace(/^Bambu Lab /, '')} · {current.nozzle} mm <Icon name="chevron-down" /></span>
             </button>
             {bambu.open && bambu.pos && (
               <div

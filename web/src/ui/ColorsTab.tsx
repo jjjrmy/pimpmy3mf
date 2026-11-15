@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { Params, RGB } from '../core/types';
 import { Slider } from './Slider';
 import { hexToRgb, rgbToHex } from './colorMap';
+import { Icon } from './Icons';
 
 interface ColorsTabProps {
   params: Params;
@@ -42,7 +43,7 @@ function PaletteEditor({ palette, onChange }: { palette: RGB[]; onChange: (p: RG
                 }}
               />
               <button type="button" className="icon-x" title="Remove" aria-label={`Remove filament ${i + 1}`} disabled={palette.length <= 1} onClick={() => remove(i)}>
-                ✕
+                <Icon name="close" />
               </button>
             </li>
           );

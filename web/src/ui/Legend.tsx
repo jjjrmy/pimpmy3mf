@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ColorRegion, Result } from '../core/types';
 import { deltaE2000, hexToLab, MATERIAL_CLASSES, type Filament, type Suggestion } from '../shared/filaments';
 import { BrandFilter } from './BrandFilter';
+import { Icon } from './Icons';
 import { MaterialFilter } from './MaterialFilter';
 
 interface LegendProps {
@@ -71,7 +72,7 @@ function SuggestionStrip({
         disabled={!list.length}
         onClick={() => onStep(-1)}
       >
-        ◀
+        <Icon name="chevron-left" />
       </button>
       {picked ? (
         <div className="suggest-body">
@@ -107,7 +108,7 @@ function SuggestionStrip({
           <span className="suggest-text">
             <span className="suggest-name">Detected color</span>
             <span className="suggest-meta">
-              ▶ {list.length} filament matches · closest {list[0].filament.brand} (ΔE {list[0].deltaE.toFixed(1)}){' '}
+              {list.length} filament matches · closest {list[0].filament.brand} (ΔE {list[0].deltaE.toFixed(1)}){' '}
               <SourceBadge source={list[0].filament.source} />
             </span>
           </span>
@@ -121,7 +122,7 @@ function SuggestionStrip({
         disabled={!list.length}
         onClick={() => onStep(1)}
       >
-        ▶
+        <Icon name="chevron-right" />
       </button>
     </div>
   );
@@ -261,8 +262,12 @@ interface StatusLineProps {
 }
 
 export function StatusLine({ running, stage, error, result }: StatusLineProps) {
-  if (error) return <div className="status status-error">⚠ {error}</div>;
-  if (running) return <div className="status status-busy">⏳ {stage ?? 'Working…'}</div>;
+  if (error) return <div className="status status-error">
+        <Icon name="warning" /> {error}
+      </div>;
+  if (running) return <div className="status status-busy">
+        <Icon name="busy" /> {stage ?? 'Working…'}
+      </div>;
   if (!result) return <div className="status">Ready.</div>;
   const { stats, tile } = result;
   // result.warnings surface as toasts now, not inline here

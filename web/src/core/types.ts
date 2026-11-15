@@ -172,12 +172,15 @@ export interface Params {
    */
   perPart: boolean;
   /**
-   * Pattern depth in mm; null = Full (default: the pattern goes all the way through).
+   * Paint depth in mm; null = Full (default: the pattern goes all the way through).
    * Paint mode: only an outer shell this thick is colored (every camo modifier is intersected with the part's
-   * shell = part minus its inward offset); the interior prints in filament 1 with no modifiers.
+   * shell = part minus the inward offset of its hole-plugged envelope); the interior and the walls of bores,
+   * holes and cavities print in filament 1 with no modifiers.
    * Image mode: only the top `depth` mm is multi-color, over a solid filament-1 base; >= thickness = Full.
    */
   depth: number | null;
+  /** Paint mode with a paint depth: also shell the walls of holes, bores and cavities (e.g. a cup's inside). */
+  paintInside: boolean;
   /** Paint mode: surface relief regions (texture-face tool), applied in this order. */
   textures: FaceTexture[];
 }
@@ -200,6 +203,7 @@ export const DEFAULT_PARAMS: Params = {
   offsetY: 0,
   perPart: false,
   depth: null,
+  paintInside: false,
   textures: [],
 };
 
@@ -268,8 +272,14 @@ export interface Result {
    * mesh / objectMeshes / partMeshes) already have these volumes subtracted. [] when none / image mode.
    */
   faceSkins: FaceSkin[];
-  /** Effective pattern depth used for this result (null = Full; image mode also null when depth >= thickness). */
+  /** Effective paint depth used for this result (null = Full; image mode also null when depth >= thickness). */
   depth: number | null;
+  /**
+   * Paint mode with a paint depth (outside surfaces only): per [object][part] of result.model (the textured mesh
+   * when result.shaped has one), the triangles lining holes, bores and cavities. They print in filament 1, so
+   * the preview shows them that way. null = none.
+   */
+  innerFaces: (Uint32Array | null)[][] | null;
   /**
    * Image mode with a depth: the full-thickness slab (all colors' footprint, z 0..thickness), printed as ONE
    * filament-1 part. regions[0].mesh is then color 1's printed piece (the slab minus the other colors' caps) and

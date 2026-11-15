@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Icon } from './Icons';
 
 interface MaterialFilterProps {
   options: string[];
@@ -108,7 +109,7 @@ export function MaterialFilter({ options, value, onChange }: MaterialFilterProps
               onClick={() => choose(o)}
             >
               <span className="menu-check" aria-hidden>
-                {o === value ? '✓' : ''}
+                {o === value ? <Icon name="check" /> : null}
               </span>
               {o}
             </li>

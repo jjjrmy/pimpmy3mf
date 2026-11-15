@@ -34,6 +34,7 @@ import { useToast } from './ui/Toast';
 import { hexToRgb } from './ui/colorMap';
 import { useFilaments } from './ui/useFilaments';
 import { usePresets } from './ui/usePresets';
+import { Icon } from './ui/Icons';
 import type { PresetItem } from './shared/presets';
 import { DEFAULT_BRANDS, normalizeMaterial, rankSuggestions, resolveBrands } from './shared/filaments';
 
@@ -42,9 +43,11 @@ const PRINTER_KEY = 'pimpmy3mf.printerId';
 const MATERIAL_KEY = 'pimpmy3mf.material';
 const BRANDS_KEY = 'pimpmy3mf.brands';
 const DEPTH_KEY = 'pimpmy3mf.depth';
+const PAINT_INSIDE_KEY = 'pimpmy3mf.paintInside';
 const PATTERN_KEY = 'pimpmy3mf.texturePattern';
 
-/** Saved pattern depth: a positive mm value, or null (Full; stored as 'full' or absent). */
+/** Saved paint depth: a positive mm value, or null (Full; stored as 'full' or absent). The key predates the
+ *  rename from "pattern depth" and stays so saved values carry over. */
 function loadDepth(): number | null {
   const saved = localStorage.getItem(DEPTH_KEY);
   if (saved == null || saved === 'full') return null;
@@ -140,7 +143,11 @@ export default function App() {
     };
   }, []);
 
-  const [params, setParams] = useState<Params>(() => ({ ...DEFAULT_PARAMS, depth: loadDepth() }));
+  const [params, setParams] = useState<Params>(() => ({
+    ...DEFAULT_PARAMS,
+    depth: loadDepth(),
+    paintInside: localStorage.getItem(PAINT_INSIDE_KEY) === '1',
+  }));
   // Mode is implicit: a model loaded means paint mode, none means flat tile mode. Only ever changed by
   // loading / clearing a model, so it stays in sync with `model`.
   const [mode, setMode] = useState<'image' | 'paint'>('image');
@@ -215,6 +222,9 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(DEPTH_KEY, params.depth == null ? 'full' : String(params.depth));
   }, [params.depth]);
+  useEffect(() => {
+    localStorage.setItem(PAINT_INSIDE_KEY, params.paintInside ? '1' : '0');
+  }, [params.paintInside]);
 
   // reset overrides + visibility when the palette definition changes
   useEffect(() => {
@@ -915,7 +925,7 @@ export default function App() {
                 <div className="empty-state">
                   <div className="empty-card">
                     <div className="empty-icon" aria-hidden>
-                      🔧
+                      <Icon name="wrench" />
                     </div>
                     <h3>{emptyTitle}</h3>
                     <p>{emptyBody}</p>
