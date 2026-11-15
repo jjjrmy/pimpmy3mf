@@ -1,11 +1,12 @@
 import { useRef } from 'react';
 
-export type TabId = 'texture' | 'design' | 'colors';
+export type TabId = 'paint' | 'design' | 'colors' | 'texture';
 
 export const TABS: { id: TabId; label: string }[] = [
-  { id: 'texture', label: 'Texture' },
+  { id: 'paint', label: 'Paint' },
   { id: 'design', label: 'Design' },
   { id: 'colors', label: 'Colors' },
+  { id: 'texture', label: 'Texture' },
 ];
 
 /** The chunky yellow tab strip. Full `role=tablist` with roving focus + arrow-key navigation. */

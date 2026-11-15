@@ -63,7 +63,8 @@ and every other color is its cap.
 (`--projection cylindrical`). The web app also has three interactive tools that are web-only: **Lay on
 face** (click a face to lay the model flat on it), **Paint face** (brush colors straight onto the
 model) and **Texture face** (add knurl, stipple, ridges, hex or image relief to a flat or curved
-surface).
+surface). Grip patterns live in the web app's TEXTURE tab, along with a pattern library of your own
+height maps that stays in your browser.
 
 Output goes next to the image in `<name>-<N>colors/`:
 - a Bambu Studio project `.3mf`, or a plain 3MF with `--no-bambu`;

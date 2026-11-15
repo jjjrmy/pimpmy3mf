@@ -681,7 +681,8 @@ export async function applyTextures(
   for (let ti = 0; ti < textures.length; ti++) {
     const tex = textures[ti];
     if (onProgress) await onProgress(ti, textures.length);
-    const name = `${tex.pattern} ${ti + 1}`;
+    const PATTERN_NAMES: Record<string, string> = { knurl: 'Diamond knurl', stipple: 'Stipple', ridges: 'Ridges', hex: 'Hex', image: 'Pattern' };
+    const name = `${tex.patternRef?.name ?? PATTERN_NAMES[tex.pattern] ?? tex.pattern} (area ${ti + 1})`;
     const part = model.objects[tex.objectIndex]?.parts[tex.partIndex];
     if (!part || !tex.triangles.length || !(tex.pitch > 0) || !(tex.height > 0)) continue;
     const nt0 = part.mesh.triangles.length / 3;

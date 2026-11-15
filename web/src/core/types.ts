@@ -28,7 +28,7 @@ export interface PaintedFace {
 /** Relief patterns for the texture-face tool. 'image' = a custom grayscale height map. */
 export type TexturePattern = 'knurl' | 'stipple' | 'ridges' | 'hex' | 'image';
 
-/** 8-bit grayscale height map (white = high), row-major, first row = top. Kept small (<= 256 px a side). */
+/** 8-bit grayscale height map (white = high), row-major, first row = top. Kept small (<= 512 px a side). */
 export interface HeightMap {
   width: number;
   height: number;
@@ -55,8 +55,13 @@ export interface FaceTexture {
   pitch: number;
   /** Pattern rotation in degrees (ridges angle, knurl/hex/image rotation; stipple ignores it). */
   rotation: number;
-  /** pattern 'image' only. */
+  /**
+   * pattern 'image' only: the height map itself, embedded so the texture never depends on the pattern library
+   * (deleting or renaming a library pattern can't break a textured area).
+   */
   image: HeightMap | null;
+  /** pattern 'image' only: the browser pattern-library entry it came from (UI label / re-pick), or null. */
+  patternRef: { id: string; name: string } | null;
   /** Region area in mm² (as loaded). */
   area: number;
 }

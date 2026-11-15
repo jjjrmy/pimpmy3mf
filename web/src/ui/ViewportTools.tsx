@@ -1,8 +1,7 @@
 // Paint-mode viewport toolbar: Lay-on-face, Paint-face and Texture-face tools, plus orientation Undo / Reset.
 // Sits as a small overlay inside the 3D viewport (themed "Pimp My Ride" chips). Purely presentational:
-// the active tool, hover highlighting and picking live in Viewer3D / App.
-
-import { TextureSettingsForm, type TextureSettings } from './TextureSettings';
+// the active tool, hover highlighting and picking live in Viewer3D / App. The Texture face tool's settings
+// live in the TEXTURE tab; here it only has the Add / Eraser toggle.
 
 export type ViewportTool = 'lay' | 'paint' | 'texture';
 
@@ -20,13 +19,9 @@ interface ViewportToolsProps {
   /** Active brush: palette index to paint with, or null = eraser. */
   brush: number | null;
   onBrush: (brush: number | null) => void;
-  /** Texture-face tool: settings for the next selection. */
-  textureSettings: TextureSettings;
-  onTextureSettings: (patch: Partial<TextureSettings>) => void;
   /** Texture-face tool in eraser mode (a stroke removes textures instead of adding one). */
   textureErase: boolean;
   onTextureErase: (erase: boolean) => void;
-  onTextureError: (message: string) => void;
 }
 
 /** Toggle a tool: clicking the active one exits (null). */
@@ -40,11 +35,8 @@ export function ViewportTools({
   colors,
   brush,
   onBrush,
-  textureSettings,
-  onTextureSettings,
   textureErase,
   onTextureErase,
-  onTextureError,
 }: ViewportToolsProps) {
   const toggle = (tool: ViewportTool) => onToolChange(activeTool === tool ? null : tool);
   return (
@@ -112,8 +104,8 @@ export function ViewportTools({
         <span className="vtool-label">Texture face</span>
       </button>
       {activeTool === 'texture' && (
-        <div className="vtool-panel" role="group" aria-label="Texture settings">
-          <div className="segmented segmented-sm" role="group" aria-label="Texture brush">
+        <div className="vtool-panel vtool-panel-sm" role="group" aria-label="Texture brush">
+          <div className="segmented segmented-sm">
             <button type="button" className={textureErase ? '' : 'is-active'} aria-pressed={!textureErase} onClick={() => onTextureErase(false)}>
               Add
             </button>
@@ -121,11 +113,7 @@ export function ViewportTools({
               ⌫ Eraser
             </button>
           </div>
-          {textureErase ? (
-            <p className="hint tex-hint">Click or drag over a textured face to remove its texture.</p>
-          ) : (
-            <TextureSettingsForm value={textureSettings} onChange={onTextureSettings} onError={onTextureError} />
-          )}
+          <p className="hint tex-hint">{textureErase ? 'Click or drag over a textured face to remove it.' : 'Pattern & settings: Texture tab.'}</p>
         </div>
       )}
       {hasOrientation && (

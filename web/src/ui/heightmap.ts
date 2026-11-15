@@ -1,11 +1,13 @@
-// Custom texture height maps: decode an uploaded image on the main thread into a small 8-bit grayscale
+// Grip-pattern height maps: decode an uploaded image on the main thread into a small 8-bit grayscale
 // HeightMap (white = high), and turn one back into a data URL for thumbnails.
 import type { HeightMap } from '../core/types';
 
-const MAX_SIDE = 256;
+/** The core accepts maps up to 512 px a side. */
+export const HEIGHTMAP_MAX_SIDE = 512;
 
-/** Decode an image file to grayscale, downscaled so the longest side is at most 256 px. */
-export async function decodeHeightMap(file: Blob): Promise<HeightMap> {
+/** Decode an image file to grayscale (luminance), downscaled so the longest side is at most `maxSide` px. */
+export async function decodeHeightMap(file: Blob, maxSide = 256): Promise<HeightMap> {
+  const MAX_SIDE = Math.max(1, Math.min(HEIGHTMAP_MAX_SIDE, Math.round(maxSide)));
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file);

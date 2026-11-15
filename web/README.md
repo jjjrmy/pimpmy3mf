@@ -39,17 +39,23 @@ Both use the same algorithm.
   - **Paint face** (web-only): pick a palette color, then click or drag across faces. Painted faces
     print solid in that color, ~1 mm deep, instead of the camo. The eraser removes them.
   - **Texture face** (web-only): real grip relief on flat or curved faces. Pick diamond knurl,
-    stipple, ridges, hex or your own grayscale image, raised or recessed, 0.2–1.5 mm deep, with a
-    pitch and angle. The selected surface is subdivided and pushed along its normals, fading out at the
+    stipple, ridges, hex or a pattern from your library, raised or recessed, 0.2–1.5 mm deep, with a
+    pitch and angle. All of it is set in the TEXTURE tab; turning the tool on opens that tab. The selected surface is subdivided and pushed along its normals, fading out at the
     edge, so it stays one watertight part. The camo still colors it.
 - **UI:** "The 3MF Pimper", styled after the MTV *Pimp My Ride* Flash game.
   - Drag an image or a model anywhere on the page. Loading a model switches to paint mode.
-  - The TEXTURE / DESIGN / COLORS tabs hold the controls.
+  - The PAINT / DESIGN / COLORS / TEXTURE tabs hold the controls. PAINT picks the model and the camo
+    (or your own image); TEXTURE holds the grip patterns and the list of textured areas.
+  - **Pattern library** (TEXTURE tab): "+ Upload pattern" (or drop an image on it) turns any image
+    into a grayscale height map, at most 512 px, white = high. It is saved in the browser's IndexedDB,
+    never uploaded, and stays across visits. Your patterns can be renamed or deleted. A textured area
+    keeps its own copy of the map, so deleting a pattern doesn't change it. An image dropped anywhere
+    else on the page still becomes the camo.
   - The green buttons export.
   - Headings use [Lilita One](https://fonts.google.com/specimen/Lilita+One) (SIL OFL, self-hosted
     in `public/fonts/`).
 - **MW2 camo presets:** glossy round swatches of the Call of Duty: Modern Warfare 2 (2009) camos on
-  the TEXTURE tab. Picking one loads it like an upload.
+  the PAINT tab. Picking one loads it like an upload.
   - The images are third-party artwork. They are NOT in this repo; they live in a Cloudflare R2
     bucket served by the Worker (`/api/presets`, `/presets/<file>`).
   - `scripts/presets/` collects them through the Fandom MediaWiki API, converts them to WebP,

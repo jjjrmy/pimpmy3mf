@@ -7,6 +7,7 @@ import { CancelledError, PipelineClient } from './worker/client';
 import type { ExportKind } from './worker/messages';
 import type { ModelSummary } from './ui/DesignTab';
 import { TabStrip, type TabId } from './ui/TabStrip';
+import { PaintTab } from './ui/PaintTab';
 import { TextureTab } from './ui/TextureTab';
 import { DesignTab } from './ui/DesignTab';
 import { ColorsTab } from './ui/ColorsTab';
@@ -15,7 +16,19 @@ import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
 import { Viewer3D, type FacePick } from './ui/Viewer3D';
 import { ViewportTools, type ViewportTool } from './ui/ViewportTools';
-import { DEFAULT_TEXTURE_SETTINGS, type TextureSettings } from './ui/TextureSettings';
+import {
+  DEFAULT_PATTERN_KEY,
+  DEFAULT_TEXTURE_SETTINGS,
+  isBuiltinKey,
+  keyOfTexture,
+  libIdOf,
+  libKey,
+  resolvePatternKey,
+  type PatternKey,
+  type TextureSettings,
+} from './ui/TextureSettings';
+import { usePatternLibrary, patternNameFromFile } from './ui/patternLibrary';
+import { decodeHeightMap, HEIGHTMAP_MAX_SIDE } from './ui/heightmap';
 import { Legend, StatusLine } from './ui/Legend';
 import { useToast } from './ui/Toast';
 import { hexToRgb } from './ui/colorMap';
@@ -29,6 +42,7 @@ const PRINTER_KEY = 'pimpmy3mf.printerId';
 const MATERIAL_KEY = 'pimpmy3mf.material';
 const BRANDS_KEY = 'pimpmy3mf.brands';
 const DEPTH_KEY = 'pimpmy3mf.depth';
+const PATTERN_KEY = 'pimpmy3mf.texturePattern';
 
 /** Saved pattern depth: a positive mm value, or null (Full; stored as 'full' or absent). */
 function loadDepth(): number | null {
@@ -36,6 +50,11 @@ function loadDepth(): number | null {
   if (saved == null || saved === 'full') return null;
   const v = parseFloat(saved);
   return Number.isFinite(v) && v > 0 ? v : null;
+}
+/** Saved grip pattern for the next textured area: a built-in name or `lib:<id>` (default Diamond knurl). */
+function loadPatternKey(): PatternKey {
+  const saved = localStorage.getItem(PATTERN_KEY);
+  return saved && (isBuiltinKey(saved) || libIdOf(saved)) ? saved : DEFAULT_PATTERN_KEY;
 }
 /** Bambu projects always use the Textured PEI plate. */
 const PLATE = 'Textured PEI Plate';
@@ -131,7 +150,7 @@ export default function App() {
   /** Paint-mode parts hidden in the 3D view, keyed `${objectIndex}:${partIndex}`. */
   const [hiddenParts, setHiddenParts] = useState<Set<string>>(new Set());
 
-  const [tab, setTab] = useState<TabId>('texture');
+  const [tab, setTab] = useState<TabId>('paint');
 
   const [paletteMode, setPaletteMode] = useState<'auto' | 'custom'>('auto');
   const [customPalette, setCustomPalette] = useState<RGB[]>([
@@ -160,6 +179,16 @@ export default function App() {
   /** Texture-face tool: settings for the next selection, and eraser mode. */
   const [textureSettings, setTextureSettings] = useState<TextureSettings>(DEFAULT_TEXTURE_SETTINGS);
   const [textureErase, setTextureErase] = useState(false);
+  /** Grip pattern for the next textured area (built-in or library entry), remembered across visits. */
+  const [patternKey, setPatternKeyState] = useState<PatternKey>(loadPatternKey);
+  const setPatternKey = (key: PatternKey) => {
+    setPatternKeyState(key);
+    localStorage.setItem(PATTERN_KEY, key);
+  };
+  const library = usePatternLibrary();
+  const [patternUploading, setPatternUploading] = useState(false);
+  /** A file drag is over the TEXTURE tab's pattern drop zone (the page-wide overlay hides meanwhile). */
+  const [patternDragOver, setPatternDragOver] = useState(false);
 
   // whole-page drag-and-drop overlay (depth counter keeps it from flickering on child elements)
   const [dragging, setDragging] = useState(false);
@@ -267,8 +296,9 @@ export default function App() {
   // containing a crossed region's seed triangle.
   const onTextureStroke = (regions: FacePick[], erase: boolean) => {
     if (!regions.length) return;
-    if (!erase && textureSettings.pattern === 'image' && !textureSettings.image) {
-      toast({ kind: 'warning', title: 'No height map yet', message: 'Upload an image for the Custom image pattern first.' });
+    const choice = resolvePatternKey(patternKey, library.patterns);
+    if (!erase && !choice) {
+      toast({ kind: 'warning', title: 'Pattern not ready', message: 'Your pattern library is still loading. Try again in a moment.' });
       return;
     }
     const loaded = result?.model;
@@ -303,6 +333,7 @@ export default function App() {
           partIndex: g.partIndex,
           triangles: [...g.tris],
           ...textureSettings,
+          ...choice!,
           area: g.area,
         });
       }
@@ -310,6 +341,59 @@ export default function App() {
     });
   };
   const onTextures = (textures: FaceTexture[]) => patchParams({ textures });
+
+  // a saved library selection whose entry is gone (deleted in another tab / storage cleared) falls back silently
+  useEffect(() => {
+    if (library.status === 'error' && libIdOf(patternKey)) setPatternKey(DEFAULT_PATTERN_KEY);
+    if (library.status === 'ready' && libIdOf(patternKey) && !resolvePatternKey(patternKey, library.patterns)) setPatternKey(DEFAULT_PATTERN_KEY);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [library.status, library.patterns]);
+
+  /** Pattern library: an uploaded / dropped image becomes a new entry (≤512 px luminance map) and is selected. */
+  const onUploadPattern = async (file: File) => {
+    if (!(IMAGE_RE.test(file.name) || file.type.startsWith('image/'))) {
+      toast({ kind: 'error', title: "That's not an image", message: `"${file.name}" can't be used as a pattern. Try a PNG or JPG.` });
+      return;
+    }
+    setPatternUploading(true);
+    try {
+      const map = await decodeHeightMap(file, HEIGHTMAP_MAX_SIDE);
+      const entry = await library.add(patternNameFromFile(file.name), map);
+      setPatternKey(libKey(entry.id));
+      toast({ kind: 'success', title: 'Pattern saved', message: `"${entry.name}" is in your pattern library.` });
+    } catch (err) {
+      toast({ kind: 'error', title: "Couldn't add that pattern", message: (err as Error).message });
+    } finally {
+      setPatternUploading(false);
+    }
+  };
+  const onRenamePattern = (id: string, name: string) => {
+    library.rename(id, name).catch((err: Error) => toast({ kind: 'error', title: "Couldn't rename that pattern", message: err.message }));
+  };
+  const onDeletePattern = (id: string) => {
+    const name = library.patterns.find((p) => p.id === id)?.name ?? 'Pattern';
+    library
+      .remove(id)
+      .then(() => {
+        if (libIdOf(patternKey) === id) setPatternKey(DEFAULT_PATTERN_KEY);
+        toast({ kind: 'info', title: 'Pattern deleted', message: `"${name}" was removed from your library. Textured areas keep it.` });
+      })
+      .catch((err: Error) => toast({ kind: 'error', title: "Couldn't delete that pattern", message: err.message }));
+  };
+  /** Re-pick an area's pattern for the next one; a deleted library entry falls back to Diamond knurl. */
+  const onReusePattern = (t: FaceTexture) => {
+    const key = keyOfTexture(t);
+    if (isBuiltinKey(key)) return setPatternKey(key);
+    if (library.status === 'ready' && resolvePatternKey(key, library.patterns)) return setPatternKey(key);
+    toast({ kind: 'warning', title: 'That pattern was deleted', message: 'Using Diamond knurl for the next area.' });
+    setPatternKey(DEFAULT_PATTERN_KEY);
+  };
+
+  /** Activating the Texture face tool brings up its settings in the TEXTURE tab. */
+  const onToolChange = (tool: ViewportTool | null) => {
+    setActiveTool(tool);
+    if (tool === 'texture') setTab('texture');
+  };
 
   const onRemoveFace = (id: string) => patchParams({ paintedFaces: params.paintedFaces.filter((f) => f.id !== id) });
   const onClearFaces = () => patchParams({ paintedFaces: [] });
@@ -434,7 +518,8 @@ export default function App() {
     onModeChange('image');
   };
 
-  /** Dropped anywhere: a model goes to paint mode, an image becomes the texture (clearing any preset). */
+  /** Dropped anywhere: a model goes to paint mode, an image becomes the camo (clearing any preset). The TEXTURE
+   *  tab's pattern drop zone stops its drop before it gets here. */
   const handleDroppedFile = (file: File) => {
     if (MODEL_RE.test(file.name)) {
       onModel(file);
@@ -463,19 +548,25 @@ export default function App() {
       depth = Math.max(0, depth - 1);
       if (depth === 0) setDragging(false);
     };
+    // capture phase: always end the overlay, even when a drop zone stops the event from bubbling here
+    const onDropCapture = () => {
+      depth = 0;
+      setDragging(false);
+      setPatternDragOver(false);
+    };
     const onDrop = (e: DragEvent) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      depth = 0;
-      setDragging(false);
       const file = e.dataTransfer?.files?.[0];
       if (file) dropRef.current(file);
     };
     window.addEventListener('dragenter', onEnter);
     window.addEventListener('dragover', onOver);
     window.addEventListener('dragleave', onLeave);
+    window.addEventListener('drop', onDropCapture, true);
     window.addEventListener('drop', onDrop);
     return () => {
+      window.removeEventListener('drop', onDropCapture, true);
       window.removeEventListener('dragenter', onEnter);
       window.removeEventListener('dragover', onOver);
       window.removeEventListener('dragleave', onLeave);
@@ -649,7 +740,7 @@ export default function App() {
     !image && !model
       ? 'Drop a picture to tile it, or drop a model to paint it — anywhere on the page.'
       : model && !image
-        ? 'Pick a texture in the Texture tab, or drag an image anywhere.'
+        ? 'Pick a camo in the Paint tab, or drag an image anywhere.'
         : 'Your multi-color print will appear here.';
 
   const legend = (
@@ -677,7 +768,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <DropOverlay visible={dragging} />
+      <DropOverlay visible={dragging && !patternDragOver} />
 
       <header className="topbar">
         <img className="topbar-logo" src="/logo.svg" alt="Pimp My 3MF" width={198} height={128} />
@@ -698,8 +789,8 @@ export default function App() {
             <h2 className="panel-heading">Design Your Print:</h2>
             <TabStrip active={tab} onChange={setTab} />
             <div className="panel-left-body">
-              <div role="tabpanel" id="panel-texture" aria-labelledby="tab-texture" hidden={tab !== 'texture'}>
-                <TextureTab
+              <div role="tabpanel" id="panel-paint" aria-labelledby="tab-paint" hidden={tab !== 'paint'}>
+                <PaintTab
                   image={image ? { url: image.url, width: image.width, height: image.height } : null}
                   onImage={onUploadImage}
                   presets={presets}
@@ -735,8 +826,6 @@ export default function App() {
                   hexes={hexes}
                   onRemoveFace={onRemoveFace}
                   onClearFaces={onClearFaces}
-                  onTextures={onTextures}
-                  onTextureError={(message) => toast({ kind: 'error', title: "Couldn't use that image", message })}
                 />
               </div>
               <div role="tabpanel" id="panel-colors" aria-labelledby="tab-colors" hidden={tab !== 'colors'}>
@@ -748,6 +837,28 @@ export default function App() {
                   customPalette={customPalette}
                   onCustomPalette={setCustomPalette}
                   legend={legend}
+                />
+              </div>
+              <div role="tabpanel" id="panel-texture" aria-labelledby="tab-texture" hidden={tab !== 'texture'}>
+                <TextureTab
+                  mode={mode}
+                  model={model}
+                  toolAvailable={mode === 'paint' && hasResult}
+                  toolActive={activeTool === 'texture'}
+                  onActivateTool={() => onToolChange('texture')}
+                  selectedKey={patternKey}
+                  onSelectKey={setPatternKey}
+                  library={library}
+                  uploading={patternUploading}
+                  onUploadPattern={onUploadPattern}
+                  onRenamePattern={onRenamePattern}
+                  onDeletePattern={onDeletePattern}
+                  settings={textureSettings}
+                  onSettings={(patch) => setTextureSettings((t) => ({ ...t, ...patch }))}
+                  textures={params.textures}
+                  onTextures={onTextures}
+                  onReusePattern={onReusePattern}
+                  onPatternDrag={setPatternDragOver}
                 />
               </div>
             </div>
@@ -780,7 +891,7 @@ export default function App() {
               {mode === 'paint' && hasResult && (
                 <ViewportTools
                   activeTool={activeTool}
-                  onToolChange={setActiveTool}
+                  onToolChange={onToolChange}
                   hasOrientation={params.orientation != null}
                   canUndo={orientHistory.length > 0}
                   onUndo={onUndoOrient}
@@ -788,11 +899,8 @@ export default function App() {
                   colors={hexes}
                   brush={brush}
                   onBrush={setBrush}
-                  textureSettings={textureSettings}
-                  onTextureSettings={(patch) => setTextureSettings((t) => ({ ...t, ...patch }))}
                   textureErase={textureErase}
                   onTextureErase={setTextureErase}
-                  onTextureError={(message) => toast({ kind: 'error', title: "Couldn't use that image", message })}
                 />
               )}
 

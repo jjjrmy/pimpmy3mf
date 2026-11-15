@@ -115,8 +115,8 @@ const P = (extra: Partial<Params>): Params => ({
 
 let texId = 0;
 const T = (o: Partial<FaceTexture> & Pick<FaceTexture, 'triangles' | 'area' | 'pattern'>): FaceTexture => ({
-  id: `t${++texId}`, objectIndex: 0, partIndex: 0, mode: 'raised', height: 0.6, pitch: 2, rotation: 0, image: null, ...o,
-});
+  id: `t${++texId}`, objectIndex: 0, partIndex: 0, mode: 'raised', height: 0.6, pitch: 2, rotation: 0, image: null, patternRef: null, ...o,
+} as FaceTexture);
 
 // ------------------------------------------------------------------------------------ mesh checks
 
