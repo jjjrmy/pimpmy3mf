@@ -25,6 +25,42 @@ export interface PaintedFace {
   area: number;
 }
 
+/** Relief patterns for the texture-face tool. 'image' = a custom grayscale height map. */
+export type TexturePattern = 'knurl' | 'stipple' | 'ridges' | 'hex' | 'image';
+
+/** 8-bit grayscale height map (white = high), row-major, first row = top. Kept small (<= 256 px a side). */
+export interface HeightMap {
+  width: number;
+  height: number;
+  data: Uint8Array;
+}
+
+/**
+ * Real surface relief on part of a model (texture-face tool). Stored like PaintedFace: as-loaded triangle indices of
+ * one part, so it survives lay-on-face and every setting change. The region may be curved (a round grip).
+ * Shape only: the camo / painted faces still color it.
+ */
+export interface FaceTexture {
+  id: string;
+  objectIndex: number;
+  partIndex: number;
+  /** As-loaded triangle indices of the selected region (smoothRegion picks; drag adds more). */
+  triangles: number[];
+  pattern: TexturePattern;
+  /** Bumps stand out of the surface, or are cut into it. */
+  mode: 'raised' | 'recessed';
+  /** Relief height / depth in mm (0.2 .. 1.5). */
+  height: number;
+  /** Pattern period in mm (image: the width of one tile of the height map). */
+  pitch: number;
+  /** Pattern rotation in degrees (ridges angle, knurl/hex/image rotation; stipple ignores it). */
+  rotation: number;
+  /** pattern 'image' only. */
+  image: HeightMap | null;
+  /** Region area in mm² (as loaded). */
+  area: number;
+}
+
 /** Cylindrical projection geometry. Basis per axis: CYL_BASIS in src/core/cylinder.ts. */
 export interface CylinderFrame {
   /** The model's bbox center (cylinder axis passes through it), in result.model coordinates. */
@@ -137,6 +173,8 @@ export interface Params {
    * Image mode: only the top `depth` mm is multi-color, over a solid filament-1 base; >= thickness = Full.
    */
   depth: number | null;
+  /** Paint mode: surface relief regions (texture-face tool), applied in this order. */
+  textures: FaceTexture[];
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -157,6 +195,7 @@ export const DEFAULT_PARAMS: Params = {
   offsetY: 0,
   perPart: false,
   depth: null,
+  textures: [],
 };
 
 /** 2D map frame in mm (y up). Image mode: 0,0 .. w,h. Paint mode: model's projected bbox + 1 mm margin (u,v plane). */
@@ -233,6 +272,13 @@ export interface Result {
    * modifier of the slab in the 3MF and as a separate piece in the STL zip. null otherwise.
    */
   base: Mesh | null;
+  /**
+   * Paint mode with textures: the textured (relief) mesh of each part, indexed like result.model, in result.model
+   * coordinates; null where a part has no texture. result.model keeps the UNtextured meshes, so triangle indices
+   * stay valid for picking / painted faces. Exports and the 3D view use shaped[j][k] ?? the model part's mesh.
+   * Modifiers, crops, shells and the projection frame are all computed from the textured shape. null if none.
+   */
+  shaped: (Mesh | null)[][] | null;
   stats: {
     imageW: number; // original image size in px
     imageH: number;

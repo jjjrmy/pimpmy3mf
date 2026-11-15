@@ -95,6 +95,45 @@ export function planarRegion(mesh: Mesh, adj: Int32Array, seed: number, tolDeg =
   return { triangles: out, normal: [ax / len, ay / len, az / len], area };
 }
 
+/**
+ * Connected SMOOTH region around `seed` (texture tool): flood over edge-adjacent triangles while the normal turns by
+ * less than `maxDihedralDeg` across each shared edge, so curved surfaces (a round grip, a fillet) are taken whole but
+ * the flood stops at sharp edges (a box's corners, a cylinder's rim). Degenerate triangles are skipped.
+ * `normal` is the area-weighted mean normal (it can be short of unit length on curved regions before normalising).
+ */
+export function smoothRegion(mesh: Mesh, adj: Int32Array, seed: number, maxDihedralDeg = 25): PlanarRegion | null {
+  const s = triNormal(mesh, seed);
+  if (s.area === 0) return null;
+  const cosTol = Math.cos((maxDihedralDeg * Math.PI) / 180);
+  const nt = mesh.triangles.length / 3;
+  const state = new Uint8Array(nt); // 0 unseen, 1 queued
+  const normals = new Map<number, Vec3>();
+  const out: number[] = [];
+  const stack = [seed];
+  state[seed] = 1;
+  normals.set(seed, s.n);
+  let ax = 0, ay = 0, az = 0, area = 0;
+  while (stack.length) {
+    const tri = stack.pop()!;
+    const n = normals.get(tri)!;
+    const ar = triNormal(mesh, tri).area;
+    out.push(tri);
+    ax += n[0] * ar; ay += n[1] * ar; az += n[2] * ar; area += ar;
+    for (let e = 0; e < 3; e++) {
+      const nb = adj[tri * 3 + e];
+      if (nb < 0 || state[nb]) continue;
+      const t = triNormal(mesh, nb);
+      if (t.area === 0) continue;
+      if (t.n[0] * n[0] + t.n[1] * n[1] + t.n[2] * n[2] < cosTol) continue;
+      state[nb] = 1;
+      normals.set(nb, t.n);
+      stack.push(nb);
+    }
+  }
+  const len = Math.hypot(ax, ay, az) || 1;
+  return { triangles: out, normal: [ax / len, ay / len, az / len], area };
+}
+
 /** Row-major 3x3 product a·b. */
 export function mulMat3(a: number[], b: number[]): number[] {
   const o = new Array<number>(9);
@@ -136,9 +175,18 @@ export function applyMat3(m: number[], p: Vec3): Vec3 {
  * R null returns the same model object (as loaded, untouched).
  */
 export function orientModel(model: Model, R: number[] | null): Model {
+  return orientModelLike(model, model, R);
+}
+
+/**
+ * Like orientModel, but the placement (rotation centre, XY centre, drop to z = 0) is computed from `ref` and the
+ * same rigid transform is applied to `model`. Used to orient the as-loaded model exactly like its textured version
+ * (whose raised relief is what touches the bed), so both stay in the same coordinates. ref === model is orientModel.
+ */
+export function orientModelLike(model: Model, ref: Model, R: number[] | null): Model {
   if (!R) return model;
   let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
-  for (const o of model.objects) for (const p of o.parts) {
+  for (const o of ref.objects) for (const p of o.parts) {
     const v = p.mesh.vertices;
     for (let i = 0; i < v.length; i += 3) {
       if (v[i] < x0) x0 = v[i]; if (v[i] > x1) x1 = v[i];
@@ -147,22 +195,29 @@ export function orientModel(model: Model, R: number[] | null): Model {
     }
   }
   const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, cz = (z0 + z1) / 2;
-  // rotate into float64 first, then find the new bbox to place it
-  const rotated: Float64Array[] = [];
   let nx0 = Infinity, ny0 = Infinity, nz0 = Infinity, nx1 = -Infinity, ny1 = -Infinity;
-  for (const o of model.objects) for (const p of o.parts) {
-    const v = p.mesh.vertices;
-    const r = new Float64Array(v.length);
-    for (let i = 0; i < v.length; i += 3) {
-      const dx = v[i] - cx, dy = v[i + 1] - cy, dz = v[i + 2] - cz;
-      const X = R[0] * dx + R[1] * dy + R[2] * dz, Y = R[3] * dx + R[4] * dy + R[5] * dz, Z = R[6] * dx + R[7] * dy + R[8] * dz;
-      r[i] = X; r[i + 1] = Y; r[i + 2] = Z;
-      if (X < nx0) nx0 = X; if (X > nx1) nx1 = X;
-      if (Y < ny0) ny0 = Y; if (Y > ny1) ny1 = Y;
-      if (Z < nz0) nz0 = Z;
+  const rotate = (m: Model, bbox: boolean): Float64Array[] => {
+    const out: Float64Array[] = [];
+    for (const o of m.objects) for (const p of o.parts) {
+      const v = p.mesh.vertices;
+      const r = new Float64Array(v.length);
+      for (let i = 0; i < v.length; i += 3) {
+        const dx = v[i] - cx, dy = v[i + 1] - cy, dz = v[i + 2] - cz;
+        const X = R[0] * dx + R[1] * dy + R[2] * dz, Y = R[3] * dx + R[4] * dy + R[5] * dz, Z = R[6] * dx + R[7] * dy + R[8] * dz;
+        r[i] = X; r[i + 1] = Y; r[i + 2] = Z;
+        if (bbox) {
+          if (X < nx0) nx0 = X; if (X > nx1) nx1 = X;
+          if (Y < ny0) ny0 = Y; if (Y > ny1) ny1 = Y;
+          if (Z < nz0) nz0 = Z;
+        }
+      }
+      out.push(r);
     }
-    rotated.push(r);
-  }
+    return out;
+  };
+  // rotate into float64 first; the placement comes from the reference's rotated bbox
+  const rotRef = rotate(ref, true);
+  const rotated = ref === model ? rotRef : rotate(model, false);
   const tx = cx - (nx0 + nx1) / 2, ty = cy - (ny0 + ny1) / 2, tz = -nz0;
   let i = 0;
   return {

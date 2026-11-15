@@ -2,8 +2,8 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { Mesh as CoreMesh, PaintedFace, Result, Vec3 } from '../core/types';
-import { buildAdjacency, planarRegion } from '../core/faces';
+import type { Mesh as CoreMesh, FaceTexture, PaintedFace, Result, Vec3 } from '../core/types';
+import { buildAdjacency, planarRegion, smoothRegion } from '../core/faces';
 import { CYL_BASIS } from '../core/cylinder';
 import { drawColorMap, mapScale, projectUV, type MapRegion } from './colorMap';
 import type { ViewportTool } from './ViewportTools';
@@ -48,6 +48,12 @@ interface Viewer3DProps {
   onLayPick: (pick: FacePick) => void;
   /** A paint-face stroke finished: every planar region it crossed, painted with `color` (null = erase). */
   onPaintStroke: (regions: FacePick[], color: number | null) => void;
+  /** Surface textures (as-loaded triangle indices): raised ones lift the hover / stroke highlights above the relief. */
+  textures: FaceTexture[];
+  /** Texture-face tool is in eraser mode. */
+  textureErase: boolean;
+  /** A texture-face stroke finished: every smooth region it crossed (`erase` = remove textures there). */
+  onTextureStroke: (regions: FacePick[], erase: boolean) => void;
 }
 
 interface Scene {
@@ -62,6 +68,11 @@ interface Scene {
   modifierMeshes: Map<number, THREE.Mesh[]>;
   /** Paint mode: one mesh per model part, keyed `${objectIndex}:${partIndex}`. */
   partMeshes: Map<string, THREE.Mesh>;
+  /**
+   * Paint mode: what picking raycasts per part. The displayed mesh itself when untextured; for a textured part
+   * (shown as result.shaped) an invisible copy of the UNtextured geometry, so faceIndex = as-loaded triangle.
+   */
+  pickMeshes: Map<string, THREE.Mesh>;
   /** Paint mode: solid painted-face overlays, keyed by face id. */
   faceMeshes: Map<string, THREE.Mesh>;
   /** Paint mode: translucent face-skin modifiers (shown with Show modifier prisms). */
@@ -83,17 +94,33 @@ function toGeometry(m: CoreMesh): THREE.BufferGeometry {
   return g;
 }
 
-/** Non-indexed geometry of just `triangles` of `m` (for hover highlights and painted-face overlays). */
-function subGeometry(m: CoreMesh, triangles: number[]): THREE.BufferGeometry {
+/**
+ * Non-indexed geometry of just `triangles` of `m` (for hover highlights and painted-face overlays).
+ * `lift` (per triangle, mm) pushes each triangle out along its own normal, e.g. above raised relief.
+ */
+function subGeometry(m: CoreMesh, triangles: number[], lift?: Float32Array | null): THREE.BufferGeometry {
   const { vertices: v, triangles: idx } = m;
   const pos = new Float32Array(triangles.length * 9);
   let o = 0;
   for (const t of triangles) {
-    for (let j = 0; j < 3; j++) {
-      const vi = idx[t * 3 + j] * 3;
-      pos[o++] = v[vi];
-      pos[o++] = v[vi + 1];
-      pos[o++] = v[vi + 2];
+    const a = idx[t * 3] * 3, bI = idx[t * 3 + 1] * 3, c = idx[t * 3 + 2] * 3;
+    let ox = 0, oy = 0, oz = 0;
+    const d = lift ? lift[t] : 0;
+    if (d) {
+      const ux = v[bI] - v[a], uy = v[bI + 1] - v[a + 1], uz = v[bI + 2] - v[a + 2];
+      const wx = v[c] - v[a], wy = v[c + 1] - v[a + 1], wz = v[c + 2] - v[a + 2];
+      const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+      const len = Math.hypot(nx, ny, nz);
+      if (len > 0) {
+        ox = (nx / len) * d;
+        oy = (ny / len) * d;
+        oz = (nz / len) * d;
+      }
+    }
+    for (const vi of [a, bI, c]) {
+      pos[o++] = v[vi] + ox;
+      pos[o++] = v[vi + 1] + oy;
+      pos[o++] = v[vi + 2] + oz;
     }
   }
   const g = new THREE.BufferGeometry();
@@ -225,6 +252,9 @@ export function Viewer3D({
   brush,
   onLayPick,
   onPaintStroke,
+  textures,
+  textureErase,
+  onTextureStroke,
 }: Viewer3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -245,6 +275,43 @@ export function Viewer3D({
   brushRef.current = brush;
   const hexesRef = useRef(hexes);
   hexesRef.current = hexes;
+  const onTexStrokeRef = useRef(onTextureStroke);
+  onTexStrokeRef.current = onTextureStroke;
+  const texEraseRef = useRef(textureErase);
+  texEraseRef.current = textureErase;
+  const texturesRef = useRef(textures);
+  texturesRef.current = textures;
+
+  // per part `${j}:${k}`: per-triangle lift (mm) that clears the tallest RAISED texture on it, for highlights
+  const liftRef = useRef<{ textures: FaceTexture[] | null; result: Result | null; map: Map<string, Float32Array> }>({
+    textures: null,
+    result: null,
+    map: new Map(),
+  });
+  const liftFor = (oi: number, pi: number): Float32Array | null => {
+    const res = resultRef.current;
+    const cache = liftRef.current;
+    if (cache.textures !== texturesRef.current || cache.result !== res) {
+      cache.textures = texturesRef.current;
+      cache.result = res;
+      cache.map = new Map();
+      if (res?.model && res.shaped) {
+        for (const t of texturesRef.current) {
+          if (t.mode !== 'raised' || !res.shaped[t.objectIndex]?.[t.partIndex]) continue;
+          const mesh = res.model.objects[t.objectIndex]?.parts[t.partIndex]?.mesh;
+          if (!mesh) continue;
+          const key = `${t.objectIndex}:${t.partIndex}`;
+          let arr = cache.map.get(key);
+          if (!arr) {
+            arr = new Float32Array(mesh.triangles.length / 3);
+            cache.map.set(key, arr);
+          }
+          for (const tri of t.triangles) if (tri < arr.length) arr[tri] = Math.max(arr[tri], t.height + 0.05);
+        }
+      }
+    }
+    return cache.map.get(`${oi}:${pi}`) ?? null;
+  };
 
   // per-part edge adjacency, topology-only so it is reusable across poses; keyed by model load
   const adjRef = useRef<{ token: number; map: Map<string, Int32Array> }>({ token: -1, map: new Map() });
@@ -291,6 +358,7 @@ export function Viewer3D({
       regionMeshes: new Map(),
       modifierMeshes: new Map(),
       partMeshes: new Map(),
+      pickMeshes: new Map(),
       faceMeshes: new Map(),
       skinMeshes: [],
       strokeMeshes: [],
@@ -378,6 +446,7 @@ export function Viewer3D({
     b.regionMeshes.clear();
     b.modifierMeshes.clear();
     b.partMeshes.clear();
+    b.pickMeshes.clear();
     b.faceMeshes.clear(); // meshes disposed with the group; the painted-overlay effect rebuilds them
     b.skinMeshes = [];
     b.strokeMeshes = []; // stroke previews disposed with the group
@@ -414,12 +483,27 @@ export function Viewer3D({
       result.model.objects.forEach((o, j) => {
         o.parts.forEach((p, k) => {
           const key = `${j}:${k}`;
-          const mesh = new THREE.Mesh(paintedGeometry(p.mesh, result), partMaterial(texture, result));
+          // textured parts show the relief mesh (same coordinates, so the camo UVs / cylinder shader still line up)
+          const shaped = result.shaped?.[j]?.[k] ?? null;
+          const mesh = new THREE.Mesh(paintedGeometry(shaped ?? p.mesh, result), partMaterial(texture, result));
           mesh.name = p.name;
           mesh.visible = !hiddenParts.has(key);
           mesh.userData = { objectIndex: j, partIndex: k };
           b.partMeshes.set(key, mesh);
           b.objectGroup.add(mesh);
+          if (shaped) {
+            // raycast-only copy of the untextured part: three's raycaster ignores `visible`, never renders it
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(p.mesh.vertices, 3));
+            geo.setIndex(new THREE.BufferAttribute(p.mesh.triangles, 1));
+            const pick = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+            pick.visible = false;
+            pick.userData = { objectIndex: j, partIndex: k };
+            b.pickMeshes.set(key, pick);
+            b.objectGroup.add(pick);
+          } else {
+            b.pickMeshes.set(key, mesh);
+          }
         });
       });
 
@@ -597,8 +681,9 @@ export function Viewer3D({
     const down = { x: 0, y: 0, active: false };
     let hoverRaf = 0;
     let pending: { x: number; y: number } | null = null;
-    // the paint stroke in progress: regions crossed (deduped) + the brush color captured at press
-    let stroke: { regions: FacePick[]; keys: Set<string>; color: number | null } | null = null;
+    // the stroke in progress: regions crossed (deduped) + the brush captured at press. Paint: color (null = erase);
+    // texture: erase flag.
+    let stroke: { regions: FacePick[]; keys: Set<string>; texture: boolean; color: number | null; erase: boolean } | null = null;
 
     const regionKey = (pick: FacePick): string => {
       let minTri = pick.triangles[0];
@@ -632,15 +717,22 @@ export function Viewer3D({
       );
       raycaster.setFromCamera(ndc, b.camera);
       const meshes: THREE.Mesh[] = [];
-      for (const mesh of b.partMeshes.values()) if (mesh.visible) meshes.push(mesh);
+      for (const [key, mesh] of b.partMeshes) {
+        const pickMesh = b.pickMeshes.get(key);
+        if (mesh.visible && pickMesh) meshes.push(pickMesh);
+      }
       const hits = raycaster.intersectObjects(meshes, false);
       if (!hits.length || hits[0].faceIndex == null) return null;
       const hit = hits[0];
       const { objectIndex, partIndex } = hit.object.userData as { objectIndex: number; partIndex: number };
       const part = res.model.objects[objectIndex]?.parts[partIndex];
       if (!part) return null;
-      const tri = hit.faceIndex!; // non-indexed geometry: faceIndex === core triangle index
-      const region = planarRegion(part.mesh, getAdj(objectIndex, partIndex, part.mesh), tri, 1.5);
+      // display mesh: non-indexed in core triangle order; textured pick mesh: indexed core geometry. Either way
+      // faceIndex === the as-loaded core triangle index.
+      const tri = hit.faceIndex!;
+      const adj = getAdj(objectIndex, partIndex, part.mesh);
+      const region =
+        toolRef.current === 'texture' ? smoothRegion(part.mesh, adj, tri, 25) : planarRegion(part.mesh, adj, tri, 1.5);
       if (!region) return null;
       return {
         objectIndex,
@@ -673,7 +765,7 @@ export function Viewer3D({
       }
       const part = res.model.objects[pick.objectIndex].parts[pick.partIndex];
       const mesh = new THREE.Mesh(
-        subGeometry(part.mesh, pick.triangles),
+        subGeometry(part.mesh, pick.triangles, liftFor(pick.objectIndex, pick.partIndex)),
         new THREE.MeshBasicMaterial({
           color: 0xffd400,
           transparent: true,
@@ -700,13 +792,14 @@ export function Viewer3D({
       const res = resultRef.current;
       if (!res?.model) return;
       const part = res.model.objects[pick.objectIndex].parts[pick.partIndex];
-      const erase = stroke.color === null;
+      const erase = stroke.erase;
+      const color = erase ? '#ff6a5a' : stroke.texture ? '#ffd400' : (hexesRef.current[stroke.color!] ?? '#ffd400');
       const mesh = new THREE.Mesh(
-        subGeometry(part.mesh, pick.triangles),
+        subGeometry(part.mesh, pick.triangles, liftFor(pick.objectIndex, pick.partIndex)),
         new THREE.MeshBasicMaterial({
-          color: new THREE.Color(erase ? '#ff6a5a' : (hexesRef.current[stroke.color!] ?? '#ffd400')),
+          color: new THREE.Color(color),
           transparent: true,
-          opacity: erase ? 0.4 : 0.8,
+          opacity: erase ? 0.4 : stroke.texture ? 0.6 : 0.8,
           depthWrite: false,
           side: THREE.DoubleSide,
           polygonOffset: true,
@@ -743,13 +836,17 @@ export function Viewer3D({
       down.x = e.clientX;
       down.y = e.clientY;
       down.active = true;
-      if (toolRef.current !== 'paint') return;
+      const tool = toolRef.current;
+      if (tool !== 'paint' && tool !== 'texture') return;
       const pick = pickAt(e.clientX, e.clientY);
       if (!pick) return; // empty space: let OrbitControls orbit
       // start a brush stroke on the model; suspend orbit for its duration
       b.controls.enabled = false;
       clearHighlight();
-      stroke = { regions: [], keys: new Set(), color: brushRef.current };
+      stroke =
+        tool === 'texture'
+          ? { regions: [], keys: new Set(), texture: true, color: null, erase: texEraseRef.current }
+          : { regions: [], keys: new Set(), texture: false, color: brushRef.current, erase: brushRef.current === null };
       addStrokeRegion(pick);
     };
     const onPointerUp = (e: PointerEvent) => {
@@ -757,12 +854,17 @@ export function Viewer3D({
       const wasActive = down.active;
       down.active = false;
       if (stroke) {
-        const { regions, color } = stroke;
+        const { regions, color, texture, erase } = stroke;
         stroke = null;
         b.controls.enabled = true;
-        // preview stays until the painted-overlay effect swaps in the committed overlays (no flicker)
-        if (regions.length) onStrokeRef.current(regions, color);
-        else clearStrokePreview();
+        if (texture) {
+          // the relief only shows after a pipeline run; drop the preview now
+          clearStrokePreview();
+          if (regions.length) onTexStrokeRef.current(regions, erase);
+        } else if (regions.length) {
+          // preview stays until the painted-overlay effect swaps in the committed overlays (no flicker)
+          onStrokeRef.current(regions, color);
+        } else clearStrokePreview();
         return;
       }
       // lay-on-face is click-only: a small move = a click (a drag orbited)

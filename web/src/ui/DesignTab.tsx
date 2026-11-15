@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { Axis, Params, Projection, Result } from '../core/types';
+import type { Axis, FaceTexture, Params, Projection, Result } from '../core/types';
 import { Slider } from './Slider';
+import { TextureSettingsForm, patternInfo } from './TextureSettings';
 
 /** What the UI knows about a loaded model: its name, size and object/part structure. */
 export interface ModelSummary {
@@ -25,6 +26,9 @@ interface DesignTabProps {
   hexes: string[];
   onRemoveFace: (id: string) => void;
   onClearFaces: () => void;
+  /** Replace params.textures (edit / remove / clear). */
+  onTextures: (textures: FaceTexture[]) => void;
+  onTextureError: (message: string) => void;
 }
 
 /** Planar: projection direction. */
@@ -122,6 +126,68 @@ function PaintedFaces(props: DesignTabProps) {
             })}
           </ul>
           <button type="button" className="btn-ghost" onClick={onClearFaces}>
+            Clear all
+          </button>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Surface textures (texture-face tool): pattern, direction, height, pitch and area, with edit / remove / Clear all. */
+function Textures(props: DesignTabProps) {
+  const { params, model, onTextures, onTextureError } = props;
+  const textures = params.textures;
+  const [editing, setEditing] = useState<string | null>(null);
+  const totalParts = model ? model.objects.reduce((c, o) => c + o.parts.length, 0) : 0;
+  const multiPart = totalParts > 1;
+  const patch = (id: string, change: Partial<FaceTexture>) =>
+    onTextures(textures.map((t) => (t.id === id ? { ...t, ...change } : t)));
+  return (
+    <section className="control-group">
+      <h3 className="tab-subhead">Textures</h3>
+      {textures.length === 0 ? (
+        <p className="hint">Use Texture face in the 3D view to add grip relief.</p>
+      ) : (
+        <>
+          <ul className="face-list">
+            {textures.map((t, i) => {
+              const info = patternInfo(t.pattern);
+              const partName = multiPart ? model?.objects[t.objectIndex]?.parts[t.partIndex] : undefined;
+              const open = editing === t.id;
+              return (
+                <li key={t.id} className={`face-row tex-row${open ? ' is-open' : ''}`}>
+                  <div className="tex-row-head">
+                    <span className="tex-chip" aria-hidden title={info.label}>
+                      {info.icon}
+                    </span>
+                    <span className="face-label">
+                      <span title={info.label}>{info.label}</span>
+                      {partName && <span className="face-part" title={partName}> · {partName}</span>}
+                      <span className="tex-meta">
+                        {t.mode === 'raised' ? 'Raised' : 'Recessed'} {t.height} mm · {t.pitch} mm pitch · {t.area.toFixed(1)} mm²
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className={`icon-x tex-edit${open ? ' is-active' : ''}`}
+                      aria-label={`Edit texture ${i + 1}`}
+                      aria-expanded={open}
+                      title={open ? 'Done' : 'Edit'}
+                      onClick={() => setEditing(open ? null : t.id)}
+                    >
+                      ✎
+                    </button>
+                    <button type="button" className="icon-x" aria-label={`Remove texture ${i + 1}`} title="Remove" onClick={() => onTextures(textures.filter((x) => x.id !== t.id))}>
+                      ✕
+                    </button>
+                  </div>
+                  {open && <TextureSettingsForm value={t} onChange={(change) => patch(t.id, change)} onError={onTextureError} />}
+                </li>
+              );
+            })}
+          </ul>
+          <button type="button" className="btn-ghost" onClick={() => onTextures([])}>
             Clear all
           </button>
         </>
@@ -308,6 +374,9 @@ export function DesignTab(props: DesignTabProps) {
 
       {/* ---- painted faces (paint mode) ---- */}
       {mode === 'paint' && model && <PaintedFaces {...props} />}
+
+      {/* ---- surface textures (paint mode) ---- */}
+      {mode === 'paint' && model && <Textures {...props} />}
 
       {/* ---- advanced ---- */}
       <details className="advanced">

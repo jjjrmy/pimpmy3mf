@@ -99,7 +99,7 @@ async function renderPreview(result: Result, hexes: string[], src: RasterImage):
   drawColorMap(mctx, mapRegions(result, hexes), result.frame, s);
   // Cylindrical projection unwraps the model, so a planar silhouette fade doesn't apply there.
   if (result.mode === 'paint' && result.model && result.projection !== 'cylindrical') {
-    const meshes = result.model.objects.flatMap((o) => o.parts.map((p) => p.mesh));
+    const meshes = result.model.objects.flatMap((o, j) => o.parts.map((p, k) => result.shaped?.[j]?.[k] ?? p.mesh));
     fadeOutsideSilhouette(mctx, mapW, mapH, meshes, result.frame, result.axis, mkOffscreen);
   }
 

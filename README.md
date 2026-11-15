@@ -60,9 +60,10 @@ as one piece. The per-color STLs are then the matching pieces: color 1 is the ba
 and every other color is its cap.
 
 **Cylindrical projection** (wrap the pattern around a model) works in both the web app and the CLI
-(`--projection cylindrical`). The web app also has two interactive tools that are web-only: **Lay on
-face** (click a face to lay the model flat on it) and **Paint face** (brush colors straight onto the
-model).
+(`--projection cylindrical`). The web app also has three interactive tools that are web-only: **Lay on
+face** (click a face to lay the model flat on it), **Paint face** (brush colors straight onto the
+model) and **Texture face** (add knurl, stipple, ridges, hex or image relief to a flat or curved
+surface).
 
 Output goes next to the image in `<name>-<N>colors/`:
 - a Bambu Studio project `.3mf`, or a plain 3MF with `--no-bambu`;

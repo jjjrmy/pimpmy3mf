@@ -397,7 +397,7 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
       const out: ExportObject[] = [];
       result.model.objects.forEach((obj, j) => {
         obj.parts.forEach((mp, k) => {
-          const parts: Part[] = [{ name: mp.name, mesh: mp.mesh, extruder: 1, subtype: 'normal_part', color: baseColor }];
+          const parts: Part[] = [{ name: mp.name, mesh: result.shaped?.[j]?.[k] ?? mp.mesh, extruder: 1, subtype: 'normal_part', color: baseColor }];
           for (const r of result.regions) {
             if (r.index < 1 || !r.partMeshes) continue;
             const mesh = r.partMeshes[j]?.[k];
@@ -416,9 +416,10 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
 
     // Default: one output object per input object, each with its object-cropped modifiers.
     return result.model.objects.map((obj, j) => {
-      const parts: Part[] = obj.parts.map((mp) => ({
+      const parts: Part[] = obj.parts.map((mp, k) => ({
         name: mp.name,
-        mesh: mp.mesh,
+        // textured parts export their relief shape
+        mesh: result.shaped?.[j]?.[k] ?? mp.mesh,
         extruder: 1,
         subtype: 'normal_part',
         color: baseColor,

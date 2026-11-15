@@ -57,6 +57,7 @@ function buildParams(a: Record<string, string>): Params {
     projection: (a.projection as Params['projection']) ?? DEFAULT_PARAMS.projection,
     orientation: null,
     paintedFaces: [],
+    textures: [],
     depth: a.depth != null && a.depth !== 'full' ? parseFloat(a.depth) : null,
   };
 }

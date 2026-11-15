@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Params, Result, RGB } from './core/types';
+import type { FaceTexture, Mesh, Params, Result, RGB } from './core/types';
 import { DEFAULT_PARAMS } from './core/types';
 import { IDENTITY3, mulMat3, rotationToDown } from './core/faces';
 import { PRINTERS } from './core/threemf';
@@ -15,6 +15,7 @@ import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
 import { Viewer3D, type FacePick } from './ui/Viewer3D';
 import { ViewportTools, type ViewportTool } from './ui/ViewportTools';
+import { DEFAULT_TEXTURE_SETTINGS, type TextureSettings } from './ui/TextureSettings';
 import { Legend, StatusLine } from './ui/Legend';
 import { useToast } from './ui/Toast';
 import { hexToRgb } from './ui/colorMap';
@@ -59,9 +60,25 @@ function friendlyStage(stage: string | null): string {
       return 'Painting faces…';
     case 'shell':
       return 'Carving the shell…';
+    case 'texture':
+      return 'Sculpting the texture…';
     default:
       return 'Working…';
   }
+}
+
+/** Summed area (mm²) of some triangles of a mesh. */
+function trianglesArea(mesh: Mesh, tris: number[]): number {
+  const v = mesh.vertices;
+  const idx = mesh.triangles;
+  let area = 0;
+  for (const t of tris) {
+    const a = idx[t * 3] * 3, b = idx[t * 3 + 1] * 3, c = idx[t * 3 + 2] * 3;
+    const ux = v[b] - v[a], uy = v[b + 1] - v[a + 1], uz = v[b + 2] - v[a + 2];
+    const wx = v[c] - v[a], wy = v[c + 1] - v[a + 1], wz = v[c + 2] - v[a + 2];
+    area += Math.hypot(uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx) / 2;
+  }
+  return area;
 }
 
 /** Stable id for a painted face (survives re-orientation and setting changes). */
@@ -140,6 +157,9 @@ export default function App() {
   const [orientHistory, setOrientHistory] = useState<(number[] | null)[]>([]);
   /** Paint-face brush: the palette index to paint with, or null = eraser. Default: index 1 (0 when N=1). */
   const [brush, setBrush] = useState<number | null>(1);
+  /** Texture-face tool: settings for the next selection, and eraser mode. */
+  const [textureSettings, setTextureSettings] = useState<TextureSettings>(DEFAULT_TEXTURE_SETTINGS);
+  const [textureErase, setTextureErase] = useState(false);
 
   // whole-page drag-and-drop overlay (depth counter keeps it from flickering on child elements)
   const [dragging, setDragging] = useState(false);
@@ -178,7 +198,7 @@ export default function App() {
   useEffect(() => {
     setActiveTool(null);
     setOrientHistory([]);
-    patchParams({ orientation: null, paintedFaces: [] });
+    patchParams({ orientation: null, paintedFaces: [], textures: [] });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelToken]);
 
@@ -242,6 +262,55 @@ export default function App() {
       return { ...p, paintedFaces: faces };
     });
   };
+  // Commit a texture-face stroke: ONE new texture per part touched, with the current settings. A new texture takes
+  // its triangles away from older ones on the same part (no relief stacked on relief). Eraser: drop every texture
+  // containing a crossed region's seed triangle.
+  const onTextureStroke = (regions: FacePick[], erase: boolean) => {
+    if (!regions.length) return;
+    if (!erase && textureSettings.pattern === 'image' && !textureSettings.image) {
+      toast({ kind: 'warning', title: 'No height map yet', message: 'Upload an image for the Custom image pattern first.' });
+      return;
+    }
+    const loaded = result?.model;
+    setParams((p) => {
+      let textures = p.textures.slice();
+      if (erase) {
+        textures = textures.filter(
+          (t) => !regions.some((r) => r.objectIndex === t.objectIndex && r.partIndex === t.partIndex && t.triangles.includes(r.seedTri)),
+        );
+        return textures.length === p.textures.length ? p : { ...p, textures };
+      }
+      const byPart = new Map<string, { objectIndex: number; partIndex: number; tris: Set<number>; area: number }>();
+      for (const r of regions) {
+        const key = `${r.objectIndex}:${r.partIndex}`;
+        let g = byPart.get(key);
+        if (!g) byPart.set(key, (g = { objectIndex: r.objectIndex, partIndex: r.partIndex, tris: new Set(), area: 0 }));
+        for (const t of r.triangles) g.tris.add(t);
+        g.area += r.area;
+      }
+      for (const g of byPart.values()) {
+        const mesh = loaded?.objects[g.objectIndex]?.parts[g.partIndex]?.mesh;
+        textures = textures.flatMap((t): FaceTexture[] => {
+          if (t.objectIndex !== g.objectIndex || t.partIndex !== g.partIndex) return [t];
+          const kept = t.triangles.filter((tri) => !g.tris.has(tri));
+          if (kept.length === t.triangles.length) return [t];
+          if (!kept.length) return [];
+          return [{ ...t, triangles: kept, area: mesh ? trianglesArea(mesh, kept) : (t.area * kept.length) / t.triangles.length }];
+        });
+        textures.push({
+          id: faceId(),
+          objectIndex: g.objectIndex,
+          partIndex: g.partIndex,
+          triangles: [...g.tris],
+          ...textureSettings,
+          area: g.area,
+        });
+      }
+      return { ...p, textures };
+    });
+  };
+  const onTextures = (textures: FaceTexture[]) => patchParams({ textures });
+
   const onRemoveFace = (id: string) => patchParams({ paintedFaces: params.paintedFaces.filter((f) => f.id !== id) });
   const onClearFaces = () => patchParams({ paintedFaces: [] });
 
@@ -666,6 +735,8 @@ export default function App() {
                   hexes={hexes}
                   onRemoveFace={onRemoveFace}
                   onClearFaces={onClearFaces}
+                  onTextures={onTextures}
+                  onTextureError={(message) => toast({ kind: 'error', title: "Couldn't use that image", message })}
                 />
               </div>
               <div role="tabpanel" id="panel-colors" aria-labelledby="tab-colors" hidden={tab !== 'colors'}>
@@ -700,6 +771,9 @@ export default function App() {
                   brush={brush}
                   onLayPick={onLayPick}
                   onPaintStroke={onPaintStroke}
+                  textures={params.textures}
+                  textureErase={textureErase}
+                  onTextureStroke={onTextureStroke}
                 />
               </div>
 
@@ -714,6 +788,11 @@ export default function App() {
                   colors={hexes}
                   brush={brush}
                   onBrush={setBrush}
+                  textureSettings={textureSettings}
+                  onTextureSettings={(patch) => setTextureSettings((t) => ({ ...t, ...patch }))}
+                  textureErase={textureErase}
+                  onTextureErase={setTextureErase}
+                  onTextureError={(message) => toast({ kind: 'error', title: "Couldn't use that image", message })}
                 />
               )}
 

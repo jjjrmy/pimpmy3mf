@@ -11,8 +11,10 @@ import { resample, despeckle, type Affine } from './raster';
 import { trace } from './trace';
 import { extrudeRegion, type CropBox } from './extrude';
 import { cylFrame, extrudeRegionsCyl } from './cylindrical';
-import { orientModel } from './faces';
-import { buildFaceSkins, subtractSkins } from './skins';
+import { orientModelLike } from './faces';
+import { buildFaceSkins, subtractSkins, type SkinExtent } from './skins';
+import { applyTextures, textureKey } from './texture';
+import type { FaceTexture } from './types';
 import { ShellCache, clipRegionsToShells, splitTile } from './shell';
 
 const MAX_CELLS = 6_000_000;
@@ -160,8 +162,10 @@ export function createPipeline(): Pipeline {
   let gGeom: (Geom & { ox: number; oy: number }) | null = null;
   let gColors: RGB[] = []; let gWarn: string[] = [];
   let eKey = ''; let eRegions: ColorRegion[] | null = null;
-  // stage 0 (orientation) and stage 4 (painted-face skins)
-  let oSrc: Model | null = null; let oKey = ''; let oModel: Model | null = null;
+  // stage 0 (textures, then orientation) and stage 4 (painted-face skins)
+  let tIn: Model | null = null; let tKey = ''; let tSrc: Model | null = null;
+  let tChanged: boolean[][] | null = null; let tApplied: FaceTexture[] = []; let tWarn: string[] = [];
+  let oSrc: Model | null = null; let oKey = ''; let oModel: Model | null = null; let oOrig: Model | null = null;
   let sKey = ''; let sRegions: ColorRegion[] | null = null; let sSkins: FaceSkin[] = [];
   // depth stage (between 3 and 4): shell-clipped modifiers (paint) / base + caps (image)
   const shellCache = new ShellCache();
@@ -171,19 +175,36 @@ export function createPipeline(): Pipeline {
     const t0 = performance.now();
     const wasm = await initManifold();
 
-    // ---- stage 0: re-orient the whole model (lay-on-face); identity keeps the loaded model object ----
-    const orientKey = params.orientation ? params.orientation.map((x) => x.toFixed(9)).join(',') : '';
-    if (srcModel !== oSrc || orientKey !== oKey) {
-      oModel = srcModel ? orientModel(srcModel, params.orientation) : null;
-      oSrc = srcModel; oKey = orientKey;
-    }
-    const model = oModel;
-
     const tick = async (stage: string, frac?: number) => {
       opts?.onProgress?.(stage, frac);
       await new Promise((r) => setTimeout(r, 0));
       if (opts?.signal?.cancelled) { const e = new Error('Cancelled'); e.name = 'Cancelled'; throw e; }
     };
+
+    // ---- stage 0a: surface textures, in as-loaded space (no textures keeps the loaded model object) ----
+    const textures = srcModel ? (params.textures ?? []) : [];
+    const texKey = textureKey(textures);
+    if (srcModel !== tIn || texKey !== tKey) {
+      if (srcModel && textures.length) {
+        await tick('texture', 0);
+        const tr = await applyTextures(wasm, srcModel, textures, (done, total) => tick('texture', total ? done / total : undefined));
+        tSrc = tr.model; tChanged = tr.model === srcModel ? null : tr.changed; tApplied = tr.applied; tWarn = tr.warnings;
+      } else {
+        tSrc = srcModel; tChanged = null; tApplied = []; tWarn = [];
+      }
+      tIn = srcModel; tKey = texKey;
+    }
+
+    // ---- stage 0b: re-orient (lay-on-face). Textured and original share one transform, placed from the textured
+    // shape; everything geometric uses the textured model, result.model / picking / skins the original ----
+    const orientKey = params.orientation ? params.orientation.map((x) => x.toFixed(9)).join(',') : '';
+    if (tSrc !== oSrc || orientKey !== oKey) {
+      oModel = tSrc ? orientModelLike(tSrc, tSrc, params.orientation) : null;
+      oOrig = srcModel && tSrc && tSrc !== srcModel ? orientModelLike(srcModel, tSrc, params.orientation) : oModel;
+      oSrc = tSrc; oKey = orientKey;
+    }
+    const model = oModel; // textured shape (geometry)
+    const origModel = oOrig; // as-loaded triangles (result.model, picking, painted faces)
 
     const geom = computeGeom(image, model, params) as Geom & { ox: number; oy: number };
 
@@ -321,11 +342,12 @@ export function createPipeline(): Pipeline {
 
     // ---- stage 4: painted-face skins (paint mode); the camo modifiers give way to them ----
     const faces = geom.mode === 'paint' ? params.paintedFaces : [];
-    const s4Key = `${d3Key}|${faces.map((f) => `${f.id}:${f.objectIndex}:${f.partIndex}:${f.color}:${f.triangles.length}`).join(';')}`;
+    const s4Key = `${d3Key}|${faces.map((f) => `${f.id}:${f.objectIndex}:${f.partIndex}:${f.color}:${f.triangles.length}`).join(';')}|${tApplied.length ? textureKey(tApplied) : ''}`;
     if (sKey !== s4Key || !sRegions) {
-      if (faces.length && model) {
+      if (faces.length && origModel) {
         await tick('paint');
-        sSkins = buildFaceSkins(wasm, model, faces, ncol, depth == null ? 1 : Math.min(1, depth));
+        const skinDepth = depth == null ? 1 : Math.min(1, depth);
+        sSkins = buildFaceSkins(wasm, origModel, faces, ncol, skinDepth, skinExtents(faces, tApplied, skinDepth));
         sRegions = subtractSkins(wasm, dRegions!, sSkins);
       } else {
         sSkins = []; sRegions = dRegions!;
@@ -354,24 +376,50 @@ export function createPipeline(): Pipeline {
       projection: geom.mode === 'paint' ? params.projection : 'planar',
       cylinder: g.cyl,
       orientation: geom.mode === 'paint' ? params.orientation : null,
-      model: geom.mode === 'paint' ? model : null,
+      model: geom.mode === 'paint' ? origModel : null,
       faceSkins: sSkins.map((k) => ({ ...k, mesh: cloneMesh(k.mesh)! })),
       depth,
       base: cloneMesh(dBase),
+      shaped: geom.mode === 'paint' && tChanged && model
+        ? model.objects.map((o, j) => o.parts.map((p, k) => (tChanged![j]?.[k] ? cloneMesh(p.mesh) : null)))
+        : null,
       stats: { imageW: image.width, imageH: image.height, gridW: g.nx, gridH: g.ny, pitch: g.qx, ms },
-      warnings: gWarn.slice(),
+      warnings: geom.mode === 'paint' && tWarn.length ? [...gWarn, ...tWarn] : gWarn.slice(),
     };
   };
 
   const dispose = () => {
     cImage = null; cModel = null; qRes = null; qSrc = null; gRings = null; gGeom = null; eRegions = null;
     qKey = ''; gKey = ''; eKey = '';
-    oSrc = null; oModel = null; oKey = ''; sRegions = null; sSkins = []; sKey = '';
+    oSrc = null; oModel = null; oOrig = null; oKey = '';
+    tIn = null; tSrc = null; tKey = ''; tChanged = null; tApplied = []; tWarn = []; sRegions = null; sSkins = []; sKey = '';
     shellCache.clear(); dRegions = null; dBase = null; dKey = '';
     void gGeom; void gColors;
   };
 
   return { run, dispose };
+}
+
+/**
+ * Painted faces that overlap a texture region (same part, shared as-loaded triangles) get a deeper/taller skin so the
+ * paint covers the raised relief and the groove floors. null = default extents.
+ */
+function skinExtents(faces: Params['paintedFaces'], textures: FaceTexture[], skinDepth: number): (SkinExtent | null)[] | undefined {
+  if (!textures.length) return undefined;
+  let any = false;
+  const out = faces.map((f) => {
+    let up = 0, down = 0;
+    const tris = new Set(f.triangles);
+    for (const t of textures) {
+      if (t.objectIndex !== f.objectIndex || t.partIndex !== f.partIndex) continue;
+      if (!t.triangles.some((i) => tris.has(i))) continue;
+      if (t.mode === 'raised') up = Math.max(up, t.height); else down = Math.max(down, t.height);
+    }
+    if (!up && !down) return null;
+    any = true;
+    return { outward: 0.05 + up, inward: skinDepth + down };
+  });
+  return any ? out : undefined;
 }
 
 // Accumulate a uvw bounding box over several vertex arrays (projected by R).

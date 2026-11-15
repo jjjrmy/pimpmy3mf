@@ -47,6 +47,12 @@ function meshToManifold(wasm: ManifoldToplevel, mesh: Mesh): ManifoldT {
   return wasm.Manifold.ofMesh(m);
 }
 
+/** Per-face slab extents in mm from the face plane (textured faces reach over the relief and down to groove floors). */
+export interface SkinExtent {
+  outward: number;
+  inward: number;
+}
+
 /**
  * One skin per painted face, in `model` coordinates (the re-oriented model): the face's planar region extruded
  * `skinDepth` (default 1 mm) inward along -normal and 0.05 mm outward. Colors are clamped to `ncolors - 1`. Faces whose triangles no
@@ -58,11 +64,12 @@ export function buildFaceSkins(
   faces: PaintedFace[],
   ncolors: number,
   skinDepth = 1,
+  extents?: (SkinExtent | null)[],
 ): FaceSkin[] {
   const { CrossSection, Manifold } = wasm;
   const out: FaceSkin[] = [];
 
-  for (const face of faces) {
+  for (const [fi, face] of faces.entries()) {
     const obj = model.objects[face.objectIndex];
     const part = obj?.parts[face.partIndex];
     if (!part || !face.triangles.length) continue; // stale object/part
@@ -109,7 +116,10 @@ export function buildFaceSkins(
     const cs = new CrossSection(polys, 'Positive');
     if (cs.isEmpty() || cs.area() <= 0) { cs.delete(); continue; }
     // skinDepth 1 keeps the literal 1.05 so the Full output stays byte-identical
-    const man = Manifold.extrude(cs, skinDepth === 1 ? 1.05 : skinDepth + 0.05).translate([0, 0, d - skinDepth]);
+    const ext = extents?.[fi];
+    const man = ext
+      ? Manifold.extrude(cs, ext.inward + ext.outward).translate([0, 0, d - ext.inward])
+      : Manifold.extrude(cs, skinDepth === 1 ? 1.05 : skinDepth + 0.05).translate([0, 0, d - skinDepth]);
     const R = [e1[0], e2[0], n[0], e1[1], e2[1], n[1], e1[2], e2[2], n[2]];
     const mesh3d = manifoldToMesh(man, R);
     cs.delete(); man.delete();

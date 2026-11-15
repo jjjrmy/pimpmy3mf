@@ -38,6 +38,10 @@ Both use the same algorithm.
     Reset orientation bring it back.
   - **Paint face** (web-only): pick a palette color, then click or drag across faces. Painted faces
     print solid in that color, ~1 mm deep, instead of the camo. The eraser removes them.
+  - **Texture face** (web-only): real grip relief on flat or curved faces. Pick diamond knurl,
+    stipple, ridges, hex or your own grayscale image, raised or recessed, 0.2–1.5 mm deep, with a
+    pitch and angle. The selected surface is subdivided and pushed along its normals, fading out at the
+    edge, so it stays one watertight part. The camo still colors it.
 - **UI:** "The 3MF Pimper", styled after the MTV *Pimp My Ride* Flash game.
   - Drag an image or a model anywhere on the page. Loading a model switches to paint mode.
   - The TEXTURE / DESIGN / COLORS tabs hold the controls.

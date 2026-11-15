@@ -1,8 +1,10 @@
-// Paint-mode viewport toolbar: Lay-on-face and Paint-face tools, plus orientation Undo / Reset.
+// Paint-mode viewport toolbar: Lay-on-face, Paint-face and Texture-face tools, plus orientation Undo / Reset.
 // Sits as a small overlay inside the 3D viewport (themed "Pimp My Ride" chips). Purely presentational:
 // the active tool, hover highlighting and picking live in Viewer3D / App.
 
-export type ViewportTool = 'lay' | 'paint';
+import { TextureSettingsForm, type TextureSettings } from './TextureSettings';
+
+export type ViewportTool = 'lay' | 'paint' | 'texture';
 
 interface ViewportToolsProps {
   activeTool: ViewportTool | null;
@@ -18,10 +20,32 @@ interface ViewportToolsProps {
   /** Active brush: palette index to paint with, or null = eraser. */
   brush: number | null;
   onBrush: (brush: number | null) => void;
+  /** Texture-face tool: settings for the next selection. */
+  textureSettings: TextureSettings;
+  onTextureSettings: (patch: Partial<TextureSettings>) => void;
+  /** Texture-face tool in eraser mode (a stroke removes textures instead of adding one). */
+  textureErase: boolean;
+  onTextureErase: (erase: boolean) => void;
+  onTextureError: (message: string) => void;
 }
 
 /** Toggle a tool: clicking the active one exits (null). */
-export function ViewportTools({ activeTool, onToolChange, hasOrientation, canUndo, onUndo, onReset, colors, brush, onBrush }: ViewportToolsProps) {
+export function ViewportTools({
+  activeTool,
+  onToolChange,
+  hasOrientation,
+  canUndo,
+  onUndo,
+  onReset,
+  colors,
+  brush,
+  onBrush,
+  textureSettings,
+  onTextureSettings,
+  textureErase,
+  onTextureErase,
+  onTextureError,
+}: ViewportToolsProps) {
   const toggle = (tool: ViewportTool) => onToolChange(activeTool === tool ? null : tool);
   return (
     <div className="viewport-tools" role="toolbar" aria-label="Paint tools">
@@ -73,6 +97,35 @@ export function ViewportTools({ activeTool, onToolChange, hasOrientation, canUnd
           >
             ⌫
           </button>
+        </div>
+      )}
+      <button
+        type="button"
+        className={`vtool${activeTool === 'texture' ? ' is-active' : ''}`}
+        onClick={() => toggle('texture')}
+        aria-pressed={activeTool === 'texture'}
+        title="Add a grip texture (real surface relief) to a face"
+      >
+        <span className="vtool-icon" aria-hidden>
+          ◈
+        </span>
+        <span className="vtool-label">Texture face</span>
+      </button>
+      {activeTool === 'texture' && (
+        <div className="vtool-panel" role="group" aria-label="Texture settings">
+          <div className="segmented segmented-sm" role="group" aria-label="Texture brush">
+            <button type="button" className={textureErase ? '' : 'is-active'} aria-pressed={!textureErase} onClick={() => onTextureErase(false)}>
+              Add
+            </button>
+            <button type="button" className={textureErase ? 'is-active' : ''} aria-pressed={textureErase} onClick={() => onTextureErase(true)}>
+              ⌫ Eraser
+            </button>
+          </div>
+          {textureErase ? (
+            <p className="hint tex-hint">Click or drag over a textured face to remove its texture.</p>
+          ) : (
+            <TextureSettingsForm value={textureSettings} onChange={onTextureSettings} onError={onTextureError} />
+          )}
         </div>
       )}
       {hasOrientation && (
