@@ -13,6 +13,7 @@ import { extrudeRegion, type CropBox } from './extrude';
 import { cylFrame, extrudeRegionsCyl } from './cylindrical';
 import { orientModel } from './faces';
 import { buildFaceSkins, subtractSkins } from './skins';
+import { ShellCache, clipRegionsToShells, splitTile } from './shell';
 
 const MAX_CELLS = 6_000_000;
 
@@ -162,6 +163,9 @@ export function createPipeline(): Pipeline {
   // stage 0 (orientation) and stage 4 (painted-face skins)
   let oSrc: Model | null = null; let oKey = ''; let oModel: Model | null = null;
   let sKey = ''; let sRegions: ColorRegion[] | null = null; let sSkins: FaceSkin[] = [];
+  // depth stage (between 3 and 4): shell-clipped modifiers (paint) / base + caps (image)
+  const shellCache = new ShellCache();
+  let dKey = ''; let dRegions: ColorRegion[] | null = null; let dBase: Mesh | null = null;
 
   const run = async (image: RasterImage, srcModel: Model | null, params: Params, opts?: RunOptions): Promise<Result> => {
     const t0 = performance.now();
@@ -296,16 +300,35 @@ export function createPipeline(): Pipeline {
       eRegions = regions; eKey = e3Key;
     }
 
+    // ---- stage 3b: pattern depth. Paint: clip every modifier to the parts' outer shell. Image: base + caps ----
+    const want = params.depth != null && Number.isFinite(params.depth) && params.depth > 0 ? params.depth : null;
+    const depth = geom.mode === 'image' ? (want != null && want < params.thickness ? want : null) : want;
+    const d3Key = `${e3Key}|${depth ?? 'F'}`;
+    if (dKey !== d3Key || !dRegions) {
+      if (depth == null) {
+        dRegions = eRegions!; dBase = null;
+      } else if (geom.mode === 'paint' && model) {
+        const shells = shellCache.get(model, depth)
+          ?? await shellCache.build(wasm, model, depth, (done, total) => tick('shell', total ? done / total : undefined));
+        await tick('shell', 1);
+        dRegions = clipRegionsToShells(wasm, eRegions!, shells); dBase = null;
+      } else {
+        const sp = splitTile(wasm, eRegions!, params.thickness, depth);
+        dRegions = sp.regions; dBase = sp.base;
+      }
+      dKey = d3Key;
+    }
+
     // ---- stage 4: painted-face skins (paint mode); the camo modifiers give way to them ----
     const faces = geom.mode === 'paint' ? params.paintedFaces : [];
-    const s4Key = `${e3Key}|${faces.map((f) => `${f.id}:${f.objectIndex}:${f.partIndex}:${f.color}:${f.triangles.length}`).join(';')}`;
+    const s4Key = `${d3Key}|${faces.map((f) => `${f.id}:${f.objectIndex}:${f.partIndex}:${f.color}:${f.triangles.length}`).join(';')}`;
     if (sKey !== s4Key || !sRegions) {
       if (faces.length && model) {
         await tick('paint');
-        sSkins = buildFaceSkins(wasm, model, faces, ncol);
-        sRegions = subtractSkins(wasm, eRegions!, sSkins);
+        sSkins = buildFaceSkins(wasm, model, faces, ncol, depth == null ? 1 : Math.min(1, depth));
+        sRegions = subtractSkins(wasm, dRegions!, sSkins);
       } else {
-        sSkins = []; sRegions = eRegions!;
+        sSkins = []; sRegions = dRegions!;
       }
       sKey = s4Key;
     }
@@ -333,6 +356,8 @@ export function createPipeline(): Pipeline {
       orientation: geom.mode === 'paint' ? params.orientation : null,
       model: geom.mode === 'paint' ? model : null,
       faceSkins: sSkins.map((k) => ({ ...k, mesh: cloneMesh(k.mesh)! })),
+      depth,
+      base: cloneMesh(dBase),
       stats: { imageW: image.width, imageH: image.height, gridW: g.nx, gridH: g.ny, pitch: g.qx, ms },
       warnings: gWarn.slice(),
     };
@@ -342,6 +367,7 @@ export function createPipeline(): Pipeline {
     cImage = null; cModel = null; qRes = null; qSrc = null; gRings = null; gGeom = null; eRegions = null;
     qKey = ''; gKey = ''; eKey = '';
     oSrc = null; oModel = null; oKey = ''; sRegions = null; sSkins = []; sKey = '';
+    shellCache.clear(); dRegions = null; dBase = null; dKey = '';
     void gGeom; void gColors;
   };
 

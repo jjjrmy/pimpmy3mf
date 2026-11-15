@@ -27,6 +27,15 @@ const REPO_URL = 'https://github.com/jjjrmy/pimpmy3mf';
 const PRINTER_KEY = 'pimpmy3mf.printerId';
 const MATERIAL_KEY = 'pimpmy3mf.material';
 const BRANDS_KEY = 'pimpmy3mf.brands';
+const DEPTH_KEY = 'pimpmy3mf.depth';
+
+/** Saved pattern depth: a positive mm value, or null (Full; stored as 'full' or absent). */
+function loadDepth(): number | null {
+  const saved = localStorage.getItem(DEPTH_KEY);
+  if (saved == null || saved === 'full') return null;
+  const v = parseFloat(saved);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
 /** Bambu projects always use the Textured PEI plate. */
 const PLATE = 'Textured PEI Plate';
 
@@ -48,6 +57,8 @@ function friendlyStage(stage: string | null): string {
       return 'Building 3D…';
     case 'paint':
       return 'Painting faces…';
+    case 'shell':
+      return 'Carving the shell…';
     default:
       return 'Working…';
   }
@@ -93,7 +104,7 @@ export default function App() {
     };
   }, []);
 
-  const [params, setParams] = useState<Params>(DEFAULT_PARAMS);
+  const [params, setParams] = useState<Params>(() => ({ ...DEFAULT_PARAMS, depth: loadDepth() }));
   // Mode is implicit: a model loaded means paint mode, none means flat tile mode. Only ever changed by
   // loading / clearing a model, so it stays in sync with `model`.
   const [mode, setMode] = useState<'image' | 'paint'>('image');
@@ -151,6 +162,10 @@ export default function App() {
   const toast = useToast();
 
   const patchParams = (patch: Partial<Params>) => setParams((p) => ({ ...p, ...patch }));
+
+  useEffect(() => {
+    localStorage.setItem(DEPTH_KEY, params.depth == null ? 'full' : String(params.depth));
+  }, [params.depth]);
 
   // reset overrides + visibility when the palette definition changes
   useEffect(() => {

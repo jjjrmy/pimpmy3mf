@@ -43,6 +43,12 @@ gives a plain 3MF. If the installed Studio has the same printer, the settings th
 are filled in from it, so newer Studios slice the project too. Or use --no-bambu for a plain 3MF
 that any version opens (Studio 1.10 ignores its per-part filaments, so there it prints in one color).
 
+--depth MM colors only an outer skin MM deep (default: full depth). In paint mode each modifier is
+cut to a shell MM thick inside the surface of what it colors (the part, or the object's parts), so
+the core prints in filament 1. In image mode (MM < --thickness) the 3MF is one full-thickness slab
+on filament 1 with each other color a modifier over its top MM; the STLs are the matching pieces
+(color 1 = the base plus its own top, color k = its cap).
+
 --rotate DEG turns the pattern counterclockwise (as seen in the preview) about the center of the
 covered area, then --offset X,Y shifts it in mm (+X right, +Y up). A turned or shifted pattern
 repeats past the image edges, so nothing is left uncovered; without --size, --apply-to also scales
@@ -421,6 +427,36 @@ def extrude_cyl(polys, cyl, r_lo, r_hi):
 
     man = man.warp_batch(warp)
     return man if not man.is_empty() else None
+
+
+def to_manifold(v, t):
+    """(V, T) mesh -> Manifold, or None if it isn't a closed manifold."""
+    man = m3d.Manifold(m3d.Mesh(np.ascontiguousarray(v, np.float32), np.ascontiguousarray(t, np.uint32)))
+    return None if man.status() != m3d.Error.NoError or man.is_empty() else man
+
+
+def from_manifold(man):
+    mesh = man.to_mesh()
+    return np.asarray(mesh.vert_properties, np.float64)[:, :3], np.asarray(mesh.tri_verts, np.int64)
+
+
+SHELL_MAX_TRI = 20_000          # erode a simplified copy: Minkowski cost grows with triangle count
+
+
+def carve_shell(man, depth):
+    """The outer depth-mm skin of a solid: man - erode(man, depth). The erosion runs on a simplified
+    copy (tolerance depth/4, coarser if still > SHELL_MAX_TRI triangles); the outer surface stays
+    the original's, exactly."""
+    ball = m3d.Manifold.sphere(1.0, 8)
+    b = np.asarray(ball.bounding_box(), float)
+    half = (b[3:] - b[:3]) / 2
+    ball = ball.scale((depth / half).tolist())        # half-extent along each axis = depth exactly
+    for tol in (depth / 4, depth / 2, depth):
+        core = man.simplify(tol)
+        if core.num_tri() <= SHELL_MAX_TRI:
+            break
+    core = core.minkowski_difference(ball)
+    return man if core.is_empty() else man - core
 
 
 def weld(tris):
@@ -1236,6 +1272,10 @@ def main():
     ap.add_argument("-s", "--size", help="mm: image width (keeps aspect) or WxH. Default 100 wide. "
                     "With --apply-to: tile size (texture repeats); omit to stretch one copy over the model")
     ap.add_argument("-t", "--thickness", type=float, default=2.0, help="image mode: extrusion height in mm (default 2)")
+    ap.add_argument("--depth", default="full", metavar="MM",
+                    help="pattern depth: color only an outer skin this many mm deep (paint: a shell "
+                         "inside the model's surface; image: the top MM of the tile over a one-color "
+                         "base). Default: full")
     ap.add_argument("--smooth", type=float, default=1.0,
                     help="edge smoothing radius in image pixels (default 1; 0 = keep hard pixel edges)")
     ap.add_argument("--min-feature", type=float, default=0.6,
@@ -1278,6 +1318,17 @@ def main():
         raise SystemExit("--colors must be between 1 and 32")
     if args.thickness <= 0:
         raise SystemExit("--thickness must be > 0")
+    if str(args.depth).strip().lower() in ("", "full"):
+        depth = None
+    else:
+        try:
+            depth = float(str(args.depth).strip().removesuffix("mm"))
+        except ValueError:
+            raise SystemExit(f"bad --depth {args.depth!r}: use a depth in mm, e.g. 0.6, or full")
+        if not depth > 0:
+            raise SystemExit("--depth must be > 0 (or full)")
+        if not args.apply_to and depth >= args.thickness:
+            depth = None                                   # as deep as the tile: same as full
     if args.per_part and not args.apply_to:
         log("note: --per-part only applies with --apply-to; ignoring")
 
@@ -1421,7 +1472,40 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
     objects, rows = [], []
-    if model is None:
+    if model is None and depth is not None:
+        # One full-thickness slab (every footprint) prints on filament 1; each other color is a
+        # modifier over just the top `depth` mm, so the project prints as one piece. The STLs are
+        # the matching pieces: color 1 = slab minus the other caps (base included), color k = cap.
+        T = args.thickness
+        allp = [p for ps in polys_mm.values() for p in ps]
+        slab = extrude([shapely.union_all(allp)], T) if allp else None
+        if slab is None:
+            raise SystemExit("nothing to export (no color regions survived)")
+        caps = {k: m for k in range(1, ncol)
+                if (m := extrude(polys_mm.get(k, []), depth, T - depth)) is not None}
+        rest = [p for k in caps for p in polys_mm[k]]
+        base = to_manifold(*slab)
+        if rest:
+            rings = [np.asarray(r.coords)[:-1] for p in rest for g in shapely.get_parts(p)
+                     for r in [g.exterior, *g.interiors]]
+            cut = m3d.Manifold.extrude(m3d.CrossSection(rings, m3d.FillRule.EvenOdd), depth + 1.0)
+            base = base - cut.translate((0.0, 0.0, T - depth))
+        pieces = {0: from_manifold(base), **caps}
+        parts = [dict(name=hexes[0], v=slab[0], t=slab[1], extruder=1, subtype="normal_part",
+                      color=hexes[0], k=0)]
+        for k in range(ncol):
+            fname = f"{stem}-{k + 1}-{hexes[k][1:]}.stl"
+            if k not in pieces:
+                rows.append((k, None))
+                continue
+            write_stl(out_dir / fname, *pieces[k])
+            rows.append((k, fname))
+            if k > 0:
+                parts.append(dict(name=hexes[k], v=caps[k][0], t=caps[k][1], extruder=k + 1,
+                                  subtype="modifier_part", color=hexes[k], k=k))
+        objects.append(dict(name=f"{stem} ({ncol} colors)", parts=parts))
+        out_3mf = out_dir / f"{stem}-{ncol}colors.3mf"
+    elif model is None:
         parts = []
         for k in range(ncol):
             mesh = extrude(polys_mm.get(k, []), args.thickness)
@@ -1439,6 +1523,44 @@ def main():
         out_3mf = out_dir / f"{stem}-{ncol}colors.3mf"
     else:
         mpath, mobjs, margin = model["path"], model["objs"], model["margin"]
+        # --depth: only an outer skin of each part gets color; every modifier is cut to the skin of
+        # what it colors (shells[o][p] = that part's skin, None = not a closed manifold -> full).
+        shells = None
+        if depth is not None:
+            t0 = time.time()
+            npart = sum(len(o["parts"]) for o in mobjs)
+            log(f"carving a {depth:g} mm shell ({npart} part{'s' * (npart > 1)})...")
+            shells = []
+            for o in mobjs:
+                row = []
+                for p in o["parts"]:
+                    man = to_manifold(p["v"], p["t"])
+                    if man is None:
+                        log(f"  warning: part {p['name']!r} isn't a closed manifold; coloring it full depth")
+                    row.append(None if man is None else carve_shell(man, depth))
+                shells.append(row)
+            log(f"  shell carved in {time.time() - t0:.1f}s")
+
+        def union_shell(ss):
+            if not ss or any(s is None for s in ss):
+                return None
+            return ss[0] if len(ss) == 1 else m3d.Manifold.batch_boolean(ss, m3d.OpType.Add)
+
+        def skin(mesh, shell):
+            """A modifier mesh cut to a shell (None = leave it whole); None if nothing is left."""
+            if shell is None:
+                return mesh
+            man = to_manifold(*mesh)
+            if man is None:
+                return mesh
+            out = man ^ shell
+            return None if out.is_empty() or out.num_tri() == 0 else from_manifold(out)
+
+        def skin_all(mods, shell):
+            return mods if shell is None else \
+                {k: r for k, m in mods.items() if (r := skin(m, shell)) is not None}
+
+        shell_all = union_shell([s for row in shells for s in row]) if shells else None
         full = {}                       # color -> whole-model modifier mesh (xyz)
         if model["proj"] == "cylindrical":
             cyl, r_lo, r_hi = model["cyl"], model["r_lo"], model["r_hi"]
@@ -1466,7 +1588,7 @@ def main():
                 full[k] = (np.asarray(mesh.vert_properties, np.float64)[:, :3],
                            np.asarray(mesh.tri_verts, np.int64))
                 man_full[k] = man
-                write_stl(out_dir / fname, *full[k])
+                write_stl(out_dir / fname, *(skin(full[k], shell_all) or full[k]))
                 rows.append((k, fname))
 
             def crop_mods(verts_xyz):
@@ -1496,7 +1618,7 @@ def main():
                     rows.append((k, None))
                     continue
                 full[k] = (mesh[0] @ R.T, mesh[1])                 # uvw -> xyz
-                write_stl(out_dir / fname, *full[k])
+                write_stl(out_dir / fname, *(skin(full[k], shell_all) or full[k]))
                 rows.append((k, fname))
 
             def crop_mods(verts_xyz):
@@ -1522,24 +1644,25 @@ def main():
         # model itself. --per-part writes per-part modifier STLs too (<stem>-part<k>-...).
         if args.per_part:
             pk = 0
-            for o in mobjs:
-                for p in o["parts"]:
+            for oi, o in enumerate(mobjs):
+                for pi, p in enumerate(o["parts"]):
                     pk += 1
                     parts = [dict(name=p["name"], v=p["v"], t=p["t"], extruder=1,
                                   subtype="normal_part", color=hexes[0], k=None)]
-                    for k, (v, t) in sorted(crop_mods(p["v"]).items()):
+                    for k, (v, t) in sorted(skin_all(crop_mods(p["v"]), shells and shells[oi][pi]).items()):
                         write_stl(out_dir / f"{stem}-part{pk}-{k + 1}-{hexes[k][1:]}-modifier.stl", v, t)
                         parts.append(dict(name=hexes[k], v=v, t=t, extruder=k + 1,
                                           subtype="modifier_part", color=hexes[k], k=k))
                     objects.append(dict(name=p["name"], parts=parts))
         else:
-            for o in mobjs:
+            for oi, o in enumerate(mobjs):
                 parts = [dict(name=p["name"], v=p["v"], t=p["t"], extruder=1, subtype="normal_part",
                               color=hexes[0], k=None) for p in o["parts"]]
                 if len(mobjs) == 1:
                     mods = {k: m for k, m in full.items() if k > 0}
                 else:
                     mods = crop_mods(np.concatenate([p["v"] for p in o["parts"]]))
+                mods = skin_all(mods, shells and union_shell(shells[oi]))
                 for k, (v, t) in sorted(mods.items()):
                     parts.append(dict(name=hexes[k], v=v, t=t, extruder=k + 1, subtype="modifier_part",
                                       color=hexes[k], k=k))
@@ -1574,6 +1697,9 @@ def main():
             how = f"cylindrical, axis {args.axis}" if model["proj"] == "cylindrical" else f"projection axis {args.axis}"
             f.write(f"# painted onto {model['path'].name} ({structure}, {split}); filament 1 = the model, "
                     f"others = modifiers ({how})\n")
+        if depth is not None:
+            f.write(f"# pattern depth {depth:g} mm: " + ("an outer shell of the model is colored\n" if model is not None
+                    else "filament 1 is a full-thickness base, the others color only its top\n"))
         f.write("filament  hex      coverage  file\n")
         for k, fname in rows:
             f.write(f"{k + 1:<9} {hexes[k]}  {100 * area.get(k, 0) / total:6.1f}%   {fname or '(none)'}\n")
@@ -1587,6 +1713,7 @@ def main():
         + (f" stretched over {mpath.name}" if model is not None and not cyl and not tile else "")
         + (f", rotated {args.rotate:g}°" if args.rotate else "")
         + (f", offset {dx:g},{dy:g} mm" if dx or dy else "")
+        + (f", pattern depth {depth:g} mm" if depth is not None else "")
         + f", grid {nx}x{ny} @ {qx:.3f} mm")
     if model is not None:
         log(f"  model: {structure}, {split}")

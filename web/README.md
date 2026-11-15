@@ -53,6 +53,9 @@ Both use the same algorithm.
   - Without the R2 binding or data (forks, `vite dev`), the picker simply doesn't show.
 - **Pattern rotation and offset** in both modes. The pattern wraps, so nothing is ever left
   uncovered.
+- **Pattern depth** in both modes, in the web app and the CLI (`--depth MM`; default full). On a
+  painted model only an outer shell that deep is colored, so the core prints in filament 1. On an
+  image tile the colors fill only its top over a one-color base, and it prints as one piece.
 - **Filament suggestions:** ◀ ▶ through real filaments for each color, from two merged catalogs:
   [filamentcolors.xyz](https://filamentcolors.xyz) (lab-**measured** colors) and
   [SpoolmanDB](https://github.com/Donkie/SpoolmanDB) (manufacturer-listed **maker** colors). Each

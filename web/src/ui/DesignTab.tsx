@@ -130,6 +130,44 @@ function PaintedFaces(props: DesignTabProps) {
   );
 }
 
+const DEPTH_MIN = 0.2;
+const DEPTH_STEP = 0.1;
+const DEPTH_MAX = 5;
+
+/** Pattern depth: 0.2 mm steps up to 5 mm (or just under the thickness in tile mode), plus a Full notch. */
+function PatternDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' | 'mode' | 'onParams'>) {
+  const tile = mode === 'image';
+  // tile mode: the last step strictly below the thickness; anything at or above it is Full
+  const max = tile
+    ? Math.max(DEPTH_MIN, Number((DEPTH_MIN + Math.floor((params.thickness - DEPTH_MIN) / DEPTH_STEP - 1e-6) * DEPTH_STEP).toFixed(1)))
+    : DEPTH_MAX;
+  const depth = params.depth;
+  const isFull = depth == null || (tile && depth >= params.thickness);
+  const shown = isFull ? max : Number(depth.toFixed(2));
+  const set = (v: number) => onParams({ depth: tile && v >= params.thickness ? null : Number(v.toFixed(2)) });
+  const hint = isFull
+    ? 'The pattern goes all the way through.'
+    : tile
+      ? `Top ${shown} mm is the pattern, on a solid color-1 base.`
+      : `Only the outer ${shown} mm is colored; the inside prints in color 1.`;
+  return (
+    <section className="control-group">
+      <h3 className="tab-subhead">Pattern depth</h3>
+      <Slider
+        label="Depth"
+        unit="mm"
+        min={DEPTH_MIN}
+        max={max}
+        step={DEPTH_STEP}
+        value={shown}
+        full={{ label: 'Full', active: isFull, onSelect: () => onParams({ depth: null }) }}
+        onChange={set}
+      />
+      <p className="hint">{hint}</p>
+    </section>
+  );
+}
+
 export function DesignTab(props: DesignTabProps) {
   const { params, onParams, mode, model, result } = props;
   const [tileWidth, setTileWidth] = useState<number>(params.width ?? 60);
@@ -264,6 +302,9 @@ export function DesignTab(props: DesignTabProps) {
           Reset pattern
         </button>
       </section>
+
+      {/* ---- pattern depth ---- */}
+      <PatternDepth params={params} mode={mode} onParams={onParams} />
 
       {/* ---- painted faces (paint mode) ---- */}
       {mode === 'paint' && model && <PaintedFaces {...props} />}

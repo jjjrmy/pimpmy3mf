@@ -438,6 +438,17 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
   }
 
   const parts: Part[] = [];
+  if (result.base) {
+    // pattern depth: one filament-1 slab with each other color's top cap as a modifier, so it prints as one piece
+    const c0 = colorOf(0, result.regions[0]?.hex);
+    parts.push({ name: c0, mesh: result.base, extruder: 1, subtype: 'normal_part', color: c0 });
+    for (const r of result.regions) {
+      if (r.index < 1 || !r.mesh) continue;
+      const c = colorOf(r.index, r.hex);
+      parts.push({ name: c, mesh: r.mesh, extruder: r.index + 1, subtype: 'modifier_part', color: c });
+    }
+    return [{ name: `${imageName} (${result.regions.length} colors)`, parts }];
+  }
   for (const r of result.regions) {
     if (!r.mesh) continue;
     const c = colorOf(r.index, r.hex);

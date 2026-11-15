@@ -48,7 +48,16 @@ img2color camo.png --colors=3 --apply-to part.3mf --size=60 --rotate=30 --offset
 img2color camo.png --colors=3 --apply-to part.3mf --axis=z  # project top-down instead of from the front (y)
 img2color camo.png --colors=3 --apply-to can.stl --projection cylindrical  # wrap the pattern around the model as a tube
 img2color camo.png --colors=3 --apply-to assembly.3mf --per-part  # one object per part, texture stays aligned
+img2color camo.png --colors=3 --apply-to part.3mf --depth=0.6      # color only a 0.6 mm skin; the core prints in filament 1
+img2color camo.png --colors=3 --thickness=2 --depth=0.4            # one-color 2 mm tile, colors only in its top 0.4 mm
 ```
+
+**Pattern depth** (`--depth MM`, default full) works in both the web app and the CLI. When painting a
+model, only an outer shell MM thick gets the colors, cut to each part's own surface, so the infill
+and inner walls print in filament 1. On an image tile thinner than `--thickness`, the 3MF holds one
+full-thickness piece on filament 1 with the other colors as modifiers over its top MM, so it prints
+as one piece. The per-color STLs are then the matching pieces: color 1 is the base plus its own top,
+and every other color is its cap.
 
 **Cylindrical projection** (wrap the pattern around a model) works in both the web app and the CLI
 (`--projection cylindrical`). The web app also has two interactive tools that are web-only: **Lay on

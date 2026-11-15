@@ -130,6 +130,13 @@ export interface Params {
    * frame, projection, rotation, offset and tiling; only the crop box changes).
    */
   perPart: boolean;
+  /**
+   * Pattern depth in mm; null = Full (default: the pattern goes all the way through).
+   * Paint mode: only an outer shell this thick is colored (every camo modifier is intersected with the part's
+   * shell = part minus its inward offset); the interior prints in filament 1 with no modifiers.
+   * Image mode: only the top `depth` mm is multi-color, over a solid filament-1 base; >= thickness = Full.
+   */
+  depth: number | null;
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -149,6 +156,7 @@ export const DEFAULT_PARAMS: Params = {
   offsetX: 0,
   offsetY: 0,
   perPart: false,
+  depth: null,
 };
 
 /** 2D map frame in mm (y up). Image mode: 0,0 .. w,h. Paint mode: model's projected bbox + 1 mm margin (u,v plane). */
@@ -216,6 +224,15 @@ export interface Result {
    * mesh / objectMeshes / partMeshes) already have these volumes subtracted. [] when none / image mode.
    */
   faceSkins: FaceSkin[];
+  /** Effective pattern depth used for this result (null = Full; image mode also null when depth >= thickness). */
+  depth: number | null;
+  /**
+   * Image mode with a depth: the full-thickness slab (all colors' footprint, z 0..thickness), printed as ONE
+   * filament-1 part. regions[0].mesh is then color 1's printed piece (the slab minus the other colors' caps) and
+   * regions[k >= 1].mesh is that color's cap (its footprint, z thickness - depth .. thickness), used as a
+   * modifier of the slab in the 3MF and as a separate piece in the STL zip. null otherwise.
+   */
+  base: Mesh | null;
   stats: {
     imageW: number; // original image size in px
     imageH: number;
