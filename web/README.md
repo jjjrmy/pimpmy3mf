@@ -77,7 +77,7 @@ Both use the same algorithm.
   - Only the outside surfaces are colored. Inside surfaces (bores, holes, sealed cavities, recessed
     mounting pockets) print in filament 1, at a set depth and at Full. A surface is inside when its
     *openness* is under the **What counts as inside** threshold (0.30 deep holes only … 0.90 shallow dips
-    too; default 0.70). Openness is the share of cosine-weighted rays from the face that escape or hit the
+    too; default 0.60). Openness is the share of cosine-weighted rays from the face that escape or hit the
     part within 3 mm, voxel-marched and smoothed over 1.5 mm, with islands under 20 mm² flipped
     (`src/core/openness.ts`). Finger grooves, open corners and shallow dishes stay outside at the default.
     A crease-bounded patch (edges over 30°) that is clearly one-sided takes one label, so the boundary
