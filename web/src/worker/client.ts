@@ -8,6 +8,7 @@ import type {
   ExportResult,
   ImageInfo,
   ModelInfo,
+  Placement,
   Request,
   Response,
 } from './messages';
@@ -40,7 +41,9 @@ export class PipelineClient {
   private pending = new Map<number, Pending>();
   /** What the worker holds, kept so a replacement worker can be brought back to the same state. */
   private image: { blob: Blob; name: string } | null = null;
-  private model: { bytes: ArrayBuffer; filename: string } | null = null;
+  /** Assembly files in order (bytes copied before transfer) and their latest placements. */
+  private files: { itemId: string; bytes: ArrayBuffer; filename: string }[] = [];
+  private placements = new Map<string, Placement>();
   /** The run the worker is busy with, and the last stage it reported. */
   private active: { reqId: number; stage: string | null } | null = null;
   /** Resolves once a replacement worker has its image and model back. */
@@ -80,7 +83,8 @@ export class PipelineClient {
     this.restarts++;
     this.spawn();
     const image = this.image;
-    const model = this.model;
+    const files = this.files.slice();
+    const placements = [...this.placements.values()];
     const settle = (kind: Request['type'], value: unknown, err?: Error) => {
       for (const p of carried) if (p.kind === kind) (err ? p.reject(err) : p.resolve(value));
     };
@@ -96,13 +100,22 @@ export class PipelineClient {
           settle('setImage', null, e as Error);
         }
       }
-      if (model) {
-        const bytes = model.bytes.slice(0);
+      // the assembly: every file again, then the current placements; model loads settle with the final state
+      const modelKinds: Request['type'][] = ['setModel', 'addModelFile', 'removeModelFile', 'setPlacements'];
+      if (files.length) {
         try {
-          settle('setModel', await this.send((reqId) => ({ type: 'setModel', reqId, bytes, filename: model.filename }), [bytes]));
+          let info: ModelInfo | null = null;
+          for (const f of files) {
+            const bytes = f.bytes.slice(0);
+            info = await this.send<ModelInfo>((reqId) => ({ type: 'addModelFile', reqId, itemId: f.itemId, bytes, filename: f.filename }), [bytes]);
+          }
+          if (placements.length) info = await this.send<ModelInfo>((reqId) => ({ type: 'setPlacements', reqId, placements }));
+          for (const k of modelKinds) settle(k, info);
         } catch (e) {
-          settle('setModel', null, e as Error);
+          for (const k of modelKinds) settle(k, null, e as Error);
         }
+      } else {
+        for (const k of modelKinds) settle(k, { triangles: 0, objects: [], sources: [], items: [] } satisfies ModelInfo);
       }
       settle('clearModel', undefined);
     })();
@@ -129,6 +142,7 @@ export class PipelineClient {
         p.resolve(msg.info);
         break;
       case 'setModel:ok':
+      case 'assembly:ok':
         p.resolve(msg.info);
         break;
       case 'run:ok':
@@ -159,16 +173,53 @@ export class PipelineClient {
     return this.send((reqId) => ({ type: 'setImage', reqId, blob, name }));
   }
 
-  async setModel(bytes: ArrayBuffer, filename: string): Promise<ModelInfo> {
+  /** Replace the whole assembly with one file, kept as loaded. */
+  async setModel(bytes: ArrayBuffer, filename: string, itemId = 'model'): Promise<ModelInfo> {
     await this.ready;
     // the bytes are transferred to the worker; keep a copy to reload a replacement worker
-    this.model = { bytes: bytes.slice(0), filename };
-    return this.send((reqId) => ({ type: 'setModel', reqId, bytes, filename }), [bytes]);
+    this.files = [{ itemId, bytes: bytes.slice(0), filename }];
+    this.placements.clear();
+    return this.send((reqId) => ({ type: 'setModel', reqId, bytes, filename, itemId }), [bytes]);
+  }
+
+  /** Add a file to the assembly (placed beside the others); `info.items` has its placement. */
+  async addModelFile(itemId: string, bytes: ArrayBuffer, filename: string): Promise<ModelInfo> {
+    await this.ready;
+    const prevFiles = this.files;
+    this.files = [...this.files.filter((f) => f.itemId !== itemId), { itemId, bytes: bytes.slice(0), filename }];
+    try {
+      const info = await this.send<ModelInfo>((reqId) => ({ type: 'addModelFile', reqId, itemId, bytes, filename }), [bytes]);
+      this.remember(info);
+      return info;
+    } catch (e) {
+      // a file that doesn't parse must not be replayed into a replacement worker
+      if (!(e instanceof CancelledError)) this.files = prevFiles;
+      throw e;
+    }
+  }
+
+  async removeModelFile(itemId: string): Promise<ModelInfo> {
+    await this.ready;
+    this.files = this.files.filter((f) => f.itemId !== itemId);
+    this.placements.delete(itemId);
+    return this.send((reqId) => ({ type: 'removeModelFile', reqId, itemId }));
+  }
+
+  async setPlacements(placements: Placement[]): Promise<ModelInfo> {
+    await this.ready;
+    for (const p of placements) if (this.files.some((f) => f.itemId === p.itemId)) this.placements.set(p.itemId, p);
+    return this.send((reqId) => ({ type: 'setPlacements', reqId, placements }));
+  }
+
+  /** Keep the worker-chosen placements so a replacement worker gets the same layout. */
+  private remember(info: ModelInfo): void {
+    for (const it of info.items) this.placements.set(it.itemId, { itemId: it.itemId, R: it.transform.R, t: it.transform.t as [number, number, number] });
   }
 
   async clearModel(): Promise<void> {
     await this.ready;
-    this.model = null;
+    this.files = [];
+    this.placements.clear();
     return this.send((reqId) => ({ type: 'clearModel', reqId }));
   }
 

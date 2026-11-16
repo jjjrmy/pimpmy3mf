@@ -19,7 +19,13 @@ export type IconName =
   | 'chevron-right'
   | 'chevron-down'
   | 'close'
-  | 'edit';
+  | 'edit'
+  | 'assemble'
+  | 'eye'
+  | 'eye-off'
+  | 'plus'
+  | 'undo'
+  | 'target';
 
 const PATHS: Record<IconName, ReactElement> = {
   lay: (
@@ -100,6 +106,41 @@ const PATHS: Record<IconName, ReactElement> = {
     <>
       <path d="M15.5 4.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 10.5-10.5Z" />
       <path d="m13.5 6.5 3 3" />
+    </>
+  ),
+  // two blocks meeting face to face, arrows pushing them together
+  assemble: (
+    <>
+      <rect x="2.5" y="8" width="7" height="8" rx="1.5" />
+      <rect x="14.5" y="8" width="7" height="8" rx="1.5" />
+      <path d="M12 3.5v3M12 17.5v3" />
+      <path d="m10.5 5 1.5 1.5L13.5 5M10.5 19l1.5-1.5 1.5 1.5" />
+    </>
+  ),
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </>
+  ),
+  'eye-off': (
+    <>
+      <path d="M4 4l16 16" />
+      <path d="M9.9 5.8A9.7 9.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16.7 16.7 0 0 1-2.6 3.4M6.4 7.4A16 16 0 0 0 2.5 12s3.5 6.5 9.5 6.5a9 9 0 0 0 4.1-1" />
+      <path d="M10 10a2.8 2.8 0 0 0 4 4" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  undo: (
+    <>
+      <path d="M9 14 4.5 9.5 9 5" />
+      <path d="M4.5 9.5h10a5 5 0 0 1 0 10H11" />
+    </>
+  ),
+  target: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="3" />
     </>
   ),
 };

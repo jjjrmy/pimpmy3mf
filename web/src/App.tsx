@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FaceTexture, Mesh, Params, Result, RGB } from './core/types';
 import { DEFAULT_PARAMS } from './core/types';
 import { IDENTITY3, mulMat3, rotationToDown } from './core/faces';
+import { composeRigid, faceFeature, solveFaceMate, type Rigid } from './core/assembly';
 import { PRINTERS } from './core/threemf';
 import { CancelledError, PipelineClient } from './worker/client';
-import type { ExportKind } from './worker/messages';
+import type { ExportKind, ModelInfo } from './worker/messages';
 import type { ModelSummary } from './ui/DesignTab';
 import { TabStrip, type TabId } from './ui/TabStrip';
-import { PaintTab } from './ui/PaintTab';
+import { PaintTab, type AssemblyFileRow } from './ui/PaintTab';
 import { TextureTab } from './ui/TextureTab';
 import { DesignTab } from './ui/DesignTab';
 import { ColorsTab } from './ui/ColorsTab';
@@ -15,8 +16,8 @@ import { ActionBar } from './ui/ActionBar';
 import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
 import { RunIndicator } from './ui/RunIndicator';
-import { Viewer3D, type FacePick } from './ui/Viewer3D';
-import { ViewportTools, type ViewportTool } from './ui/ViewportTools';
+import { Viewer3D, type FacePick, type MateFace, type PartMotion } from './ui/Viewer3D';
+import { ViewportTools, type MatePanel, type ViewportTool } from './ui/ViewportTools';
 import {
   DEFAULT_PATTERN_KEY,
   DEFAULT_TEXTURE_SETTINGS,
@@ -118,6 +119,33 @@ function faceId(): string {
     : `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+type AsmItem = ModelInfo['items'][number];
+/** One placement snapshot (assemble undo): the files in the assembly and where each sat. */
+type AsmSnapshot = { itemId: string; fileName: string; transform: Rigid }[];
+/** A face chosen in the assemble flow (triangle indices of one part, pose-independent). */
+interface MateFaceRef {
+  objectIndex: number;
+  partIndex: number;
+  triangles: number[];
+  itemId: string;
+}
+interface MateState {
+  step: MatePanel['step'];
+  moving: MateFaceRef | null;
+  target: MateFaceRef | null;
+  offset: number;
+  flip: boolean;
+  angle: number;
+}
+const MATE_START: MateState = { step: 'pickMoving', moving: null, target: null, offset: 0, flip: false, angle: 0 };
+const MOVING_COLOR = '#ff8a1f';
+const TARGET_COLOR = '#36d6ff';
+
+/** Identity of the current layout (files + placements), to tell whether a result shows it. */
+function layoutKey(items: AsmItem[]): string {
+  return items.map((it) => `${it.itemId}:${it.transform.R.join(',')}:${it.transform.t.join(',')}`).join('|');
+}
+
 interface ImageState {
   blob: Blob;
   url: string;
@@ -165,6 +193,26 @@ export default function App() {
   const [modelToken, setModelToken] = useState(0);
   /** Paint-mode parts hidden in the 3D view, keyed `${objectIndex}:${partIndex}`. */
   const [hiddenParts, setHiddenParts] = useState<Set<string>>(new Set());
+
+  // ---- assembly (several model files placed together) -----------------------------------------
+  const [asmItems, setAsmItems] = useState<AsmItem[]>([]);
+  /** Where each composed part came from, aligned with model.objects[j].parts[k]. */
+  const [asmSources, setAsmSources] = useState<ModelInfo['sources']>([]);
+  // refs mirror the latest values for handlers that chain several awaits
+  const asmItemsRef = useRef<AsmItem[]>([]);
+  const sourcesRef = useRef<ModelInfo['sources']>([]);
+  /** The uploaded File per item, so an undo can bring a removed file back. */
+  const filesRef = useRef(new Map<string, File>());
+  /** Bumps when the part structure changes (load, add, remove): refits the camera, drops the picking cache. */
+  const [geomToken, setGeomToken] = useState(0);
+  const [movingItemId, setMovingItemId] = useState<string | null>(null);
+  const [mate, setMate] = useState<MateState | null>(null);
+  const [asmHistory, setAsmHistory] = useState<AsmSnapshot[]>([]);
+  /** Layout the displayed result was computed for (picks wait until it matches the current one). */
+  const [resultLayout, setResultLayout] = useState('');
+  /** An applied mate, still shown as a preview until the re-run result arrives (no jump back meanwhile). */
+  const [pendingMotion, setPendingMotion] = useState<(PartMotion & { layout: string }) | null>(null);
+  const [asmBusy, setAsmBusy] = useState(false);
 
   const [tab, setTab] = useState<TabId>('paint');
 
@@ -258,7 +306,10 @@ export default function App() {
   // Esc exits the active tool (the paint popover eats Esc first while it is open)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setActiveTool(null);
+      if (e.key === 'Escape') {
+        setActiveTool(null);
+        setMate(null);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -417,6 +468,15 @@ export default function App() {
   const onToolChange = (tool: ViewportTool | null) => {
     setActiveTool(tool);
     if (tool === 'texture') setTab('texture');
+    if (tool === 'assemble') {
+      setMate({ ...MATE_START });
+      // mates are solved in assembly space: drop the lay-on-face pose (re-apply it once assembled)
+      if (params.orientation) {
+        setOrientHistory([]);
+        patchParams({ orientation: null });
+        toast({ kind: 'info', title: 'Lay on face was reset for assembling', message: 'Lay it on a face again when the parts are mated.' });
+      }
+    } else setMate(null);
   };
 
   const onRemoveFace = (id: string) => patchParams({ paintedFaces: params.paintedFaces.filter((f) => f.id !== id) });
@@ -514,48 +574,207 @@ export default function App() {
     }
   };
 
-  const onModel = async (file: File) => {
-    const client = clientRef.current!;
-    setBusyLabel('Loading model…');
-    try {
-      const bytes = await file.arrayBuffer();
-      const info = await client.setModel(bytes, file.name);
-      setModel({ name: file.name, triangles: info.triangles, objects: info.objects });
+  /**
+   * The worker's new model description: update the summary and, when parts were added or removed, carry painted
+   * faces, textures and hidden parts over to their parts' new indices (dropping those of removed files). A fresh
+   * load starts the paint tools over instead. Moves keep every index as it was.
+   */
+  const applyInfo = (info: ModelInfo, fresh: boolean) => {
+    const prev = sourcesRef.current;
+    const changed = fresh || JSON.stringify(prev) !== JSON.stringify(info.sources);
+    sourcesRef.current = info.sources;
+    asmItemsRef.current = info.items;
+    setAsmItems(info.items);
+    setAsmSources(info.sources);
+    const n = info.items.length;
+    setModel({ name: n === 1 ? info.items[0].fileName : `Assembly · ${n} files`, triangles: info.triangles, objects: info.objects });
+    if (fresh) {
       setHiddenParts(new Set());
       patchParams({ perPart: false }); // opt-in per model
       setModelToken((t) => t + 1);
-      setError(null);
+      setMovingItemId(null);
+      setMate(null);
+      setPendingMotion(null);
       onModeChange('paint');
+    } else if (changed) {
+      const where = new Map<string, [number, number]>();
+      info.sources.forEach((row, j) => row.forEach((src, k) => where.set(`${src.itemId}:${src.object}:${src.part}`, [j, k])));
+      const remap = (j: number, k: number): [number, number] | null => {
+        const src = prev[j]?.[k];
+        return src ? (where.get(`${src.itemId}:${src.object}:${src.part}`) ?? null) : null;
+      };
+      setParams((p) => ({
+        ...p,
+        paintedFaces: p.paintedFaces.flatMap((f) => {
+          const r = remap(f.objectIndex, f.partIndex);
+          return r ? [{ ...f, objectIndex: r[0], partIndex: r[1] }] : [];
+        }),
+        textures: p.textures.flatMap((t) => {
+          const r = remap(t.objectIndex, t.partIndex);
+          return r ? [{ ...t, objectIndex: r[0], partIndex: r[1] }] : [];
+        }),
+      }));
+      setHiddenParts(
+        (h) =>
+          new Set(
+            [...h].flatMap((key) => {
+              const [j, k] = key.split(':').map(Number);
+              const r = remap(j, k);
+              return r ? [`${r[0]}:${r[1]}`] : [];
+            }),
+          ),
+      );
+      if (!info.items.some((it) => it.itemId === movingItemId)) setMovingItemId(null);
+      setMate(null);
+    }
+    if (changed) setGeomToken((t) => t + 1);
+  };
+
+  const snapshot = (): AsmSnapshot =>
+    asmItemsRef.current.map((it) => ({ itemId: it.itemId, fileName: it.fileName, transform: { R: it.transform.R.slice(), t: [...it.transform.t] as Rigid['t'] } }));
+
+  /** Model files: added beside the current assembly, or (none loaded / `replace`) loaded fresh. */
+  const loadModels = async (files: File[], replace: boolean) => {
+    const client = clientRef.current!;
+    const models = files.filter((f) => MODEL_RE.test(f.name));
+    if (!models.length) return;
+    const fresh = replace || asmItemsRef.current.length === 0;
+    setBusyLabel(models.length > 1 ? `Loading ${models.length} models…` : 'Loading model…');
+    setAsmBusy(true);
+    try {
+      let rest = models;
+      if (fresh) {
+        const id = faceId();
+        const info = await client.setModel(await models[0].arrayBuffer(), models[0].name, id);
+        filesRef.current = new Map([[id, models[0]]]);
+        setAsmHistory([]);
+        applyInfo(info, true);
+        rest = models.slice(1);
+      }
+      if (rest.length) {
+        const before = snapshot();
+        setAsmHistory((h) => [...h, before]);
+      }
+      for (const f of rest) {
+        const id = faceId();
+        const info = await client.addModelFile(id, await f.arrayBuffer(), f.name);
+        filesRef.current.set(id, f);
+        applyInfo(info, false);
+      }
+      setError(null);
     } catch (err) {
       setError((err as Error).message);
+      toast({ kind: 'error', title: "Couldn't load that model", message: (err as Error).message });
     } finally {
       setBusyLabel(null);
+      setAsmBusy(false);
     }
   };
+  const onAddModels = (files: File[]) => loadModels(files, false);
+  const onReplaceModels = (files: File[]) => loadModels(files, true);
 
   const onClearModel = () => {
     clientRef.current!.clearModel();
     setModel(null);
     setHiddenParts(new Set());
     setModelToken((t) => t + 1);
+    setGeomToken((t) => t + 1);
+    asmItemsRef.current = [];
+    sourcesRef.current = [];
+    filesRef.current = new Map();
+    setAsmItems([]);
+    setAsmSources([]);
+    setAsmHistory([]);
+    setMovingItemId(null);
+    setMate(null);
+    setPendingMotion(null);
     if (mode === 'paint') setResult(null);
     onModeChange('image');
   };
 
+  /** Remove one file from the assembly (its painted faces / textures go with it; later parts shift down). */
+  const onRemoveFile = async (itemId: string) => {
+    if (asmItemsRef.current.length <= 1) return onClearModel();
+    const before = snapshot();
+    setAsmBusy(true);
+    try {
+      const info = await clientRef.current!.removeModelFile(itemId);
+      setAsmHistory((h) => [...h, before]);
+      filesRef.current.delete(itemId);
+      applyInfo(info, false);
+      if (info.items.length < 2 && activeTool === 'assemble') setActiveTool(null);
+    } catch (err) {
+      toast({ kind: 'error', title: "Couldn't remove that file", message: (err as Error).message });
+    } finally {
+      setAsmBusy(false);
+    }
+  };
+
+  /** Assemble undo: restore the last placement snapshot (files removed since come back, files added since go). */
+  const onUndoAssembly = async () => {
+    const snap = asmHistory[asmHistory.length - 1];
+    if (!snap || asmBusy) return;
+    const client = clientRef.current!;
+    setAsmHistory((h) => h.slice(0, -1));
+    setMate((m) => (m ? { ...MATE_START } : m));
+    setPendingMotion(null);
+    setAsmBusy(true);
+    try {
+      let info: ModelInfo | null = null;
+      for (const it of asmItemsRef.current) {
+        if (!snap.some((s) => s.itemId === it.itemId)) {
+          info = await client.removeModelFile(it.itemId);
+          applyInfo(info, false);
+        }
+      }
+      for (const it of snap) {
+        if (asmItemsRef.current.some((c) => c.itemId === it.itemId)) continue;
+        const file = filesRef.current.get(it.itemId);
+        if (!file) continue;
+        info = await client.addModelFile(it.itemId, await file.arrayBuffer(), it.fileName);
+        applyInfo(info, false);
+      }
+      info = await client.setPlacements(snap.map((it) => ({ itemId: it.itemId, R: it.transform.R, t: it.transform.t })));
+      applyInfo(info, false);
+    } catch (err) {
+      toast({ kind: 'error', title: "Couldn't undo", message: (err as Error).message });
+    } finally {
+      setAsmBusy(false);
+    }
+  };
+
+  /** Parts (`${j}:${k}`) of one file. */
+  const partKeysOf = (itemId: string): string[] =>
+    asmSources.flatMap((row, j) => row.flatMap((src, k) => (src.itemId === itemId ? [`${j}:${k}`] : [])));
+
+  const onToggleFile = (itemId: string) => {
+    const keys = partKeysOf(itemId);
+    setHiddenParts((prev) => {
+      const next = new Set(prev);
+      const allHidden = keys.every((k) => next.has(k));
+      for (const k of keys) {
+        if (allHidden) next.delete(k);
+        else next.add(k);
+      }
+      return next;
+    });
+  };
+
   /** Dropped anywhere: a model goes to paint mode, an image becomes the camo (clearing any preset). The TEXTURE
    *  tab's pattern drop zone stops its drop before it gets here. */
-  const handleDroppedFile = (file: File) => {
-    if (MODEL_RE.test(file.name)) {
-      onModel(file);
-    } else if (IMAGE_RE.test(file.name) || file.type.startsWith('image/')) {
-      onUploadImage(file);
-    } else {
-      setError(`Unsupported file "${file.name}". Drop an image (png/jpg/webp/gif/bmp) or a model (stl/3mf/obj).`);
+  const handleDroppedFiles = (files: File[]) => {
+    // every model file is added (to the assembly when one is loaded); the first image becomes the camo
+    const models = files.filter((f) => MODEL_RE.test(f.name));
+    const image = files.find((f) => !MODEL_RE.test(f.name) && (IMAGE_RE.test(f.name) || f.type.startsWith('image/')));
+    if (models.length) onAddModels(models);
+    if (image) onUploadImage(image);
+    if (!models.length && !image && files[0]) {
+      setError(`Unsupported file "${files[0].name}". Drop an image (png/jpg/webp/gif/bmp) or a model (stl/3mf/obj).`);
     }
   };
   // window drag listeners attach once; read the latest handler through a ref to avoid stale closures
-  const dropRef = useRef(handleDroppedFile);
-  dropRef.current = handleDroppedFile;
+  const dropRef = useRef(handleDroppedFiles);
+  dropRef.current = handleDroppedFiles;
   useEffect(() => {
     let depth = 0;
     const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
@@ -581,8 +800,8 @@ export default function App() {
     const onDrop = (e: DragEvent) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      const file = e.dataTransfer?.files?.[0];
-      if (file) dropRef.current(file);
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (files.length) dropRef.current(files);
     };
     window.addEventListener('dragenter', onEnter);
     window.addEventListener('dragover', onOver);
@@ -635,6 +854,7 @@ export default function App() {
     const handle = window.setTimeout(() => {
       runTimerRef.current = 0;
       const runParams: Params = { ...params, palette: paletteMode === 'custom' ? customPalette : null };
+      const layout = layoutKey(asmItemsRef.current);
       setRunning(true);
       setError(null);
       setFraction(null);
@@ -645,6 +865,7 @@ export default function App() {
         })
         .then((res) => {
           setResult(res);
+          setResultLayout(layout);
           setRunning(false);
           setStage(null);
           setFraction(null);
@@ -695,7 +916,7 @@ export default function App() {
     const p = PRINTERS.find((pr) => pr.id === printerId) ?? PRINTERS[0];
     return p.bed;
   }, [printerId]);
-  const fitKey = `${mode}|${result?.regions.length ?? 0}|${params.axis}|${modelToken}`;
+  const fitKey = `${mode}|${result?.regions.length ?? 0}|${params.axis}|${geomToken}`;
 
   const onExport = (kind: ExportKind, chosenPrinterId: string = printerId) => {
     setExportBusy(kind);
@@ -704,7 +925,10 @@ export default function App() {
       .then((res) => {
         download(res.filename, res.bytes, res.mime);
         toast({ kind: 'success', title: 'Downloaded', message: res.filename });
-        res.warnings.forEach((w) => toast({ kind: 'warning', title: 'Heads up', message: w }));
+        res.warnings.forEach((w) =>
+          // the per-part layout of an assembly is expected, not a problem
+          w.startsWith('Parts are laid out') ? toast({ kind: 'info', title: 'Per-part layout', message: w }) : toast({ kind: 'warning', title: 'Heads up', message: w }),
+        );
       })
       .catch((err: Error) => {
         setError(err.message);
@@ -770,6 +994,132 @@ export default function App() {
 
   const hasResult = !!result && result.regions.length > 0;
   const perPartAvailable = !!model?.objects.some((o) => o.parts.length > 1);
+
+  // ---- assemble tool: pick moving face -> pick target face -> preview (flip / offset / angle) -> Apply ------
+  const layout = useMemo(() => layoutKey(asmItems), [asmItems]);
+  /** The view doesn't show the current layout yet (a run is pending): picks wait, the panel says so. */
+  const asmUpdating = asmBusy || running || resultLayout !== layout || !!result?.orientation;
+
+  /** The mate preview's rigid motion for the moving file, in assembly space (= result.model while assembling). */
+  const matePreview = useMemo<Rigid | null>(() => {
+    if (!mate?.moving || !mate.target || !result?.model) return null;
+    const mMesh = result.model.objects[mate.moving.objectIndex]?.parts[mate.moving.partIndex]?.mesh;
+    const tMesh = result.model.objects[mate.target.objectIndex]?.parts[mate.target.partIndex]?.mesh;
+    if (!mMesh || !tMesh) return null;
+    const mf = faceFeature(mMesh, mate.moving.triangles);
+    const tf = faceFeature(tMesh, mate.target.triangles);
+    if (!mf || !tf) return null;
+    return solveFaceMate({
+      movingNormal: mf.normal,
+      movingCentroid: mf.centroid,
+      movingRegionPts: mf.points,
+      targetNormal: tf.normal,
+      targetCentroid: tf.centroid,
+      targetRegionPts: tf.points,
+      offset: mate.offset,
+      flip: mate.flip,
+      angle: mate.angle,
+      seat: true,
+    });
+  }, [mate, result]);
+
+  const onAssemblePick = (pick: FacePick) => {
+    if (asmUpdating || asmItems.length < 2) return;
+    const src = asmSources[pick.objectIndex]?.[pick.partIndex];
+    if (!src) return;
+    const face: MateFaceRef = { objectIndex: pick.objectIndex, partIndex: pick.partIndex, triangles: pick.triangles, itemId: src.itemId };
+    const cur = mate ?? MATE_START;
+    if (!cur.moving || cur.step === 'pickMoving' || src.itemId === cur.moving.itemId) {
+      // any part in the first step (or the moving file again): that file moves, from this face
+      setMovingItemId(src.itemId);
+      setMate({ ...MATE_START, step: 'pickTarget', moving: face });
+      return;
+    }
+    setMate({ ...cur, step: 'preview', target: face, offset: 0, flip: false, angle: 0 });
+  };
+
+  const onMateApply = async () => {
+    if (!mate?.moving || !matePreview) return;
+    const item = asmItemsRef.current.find((it) => it.itemId === mate.moving!.itemId);
+    if (!item) return;
+    const next = composeRigid(matePreview, { R: item.transform.R, t: item.transform.t as Rigid['t'] });
+    const before = snapshot();
+    const nextItems = asmItemsRef.current.map((it) => (it.itemId === item.itemId ? { ...it, transform: { R: next.R, t: next.t } } : it));
+    setPendingMotion({ keys: partKeysOf(item.itemId), R: matePreview.R, t: matePreview.t, layout: layoutKey(nextItems) });
+    setMate({ ...MATE_START });
+    setAsmBusy(true);
+    try {
+      const info = await clientRef.current!.setPlacements([{ itemId: item.itemId, R: next.R, t: next.t }]);
+      setAsmHistory((h) => [...h, before]);
+      applyInfo(info, false);
+    } catch (err) {
+      setPendingMotion(null);
+      toast({ kind: 'error', title: "Couldn't apply the mate", message: (err as Error).message });
+    } finally {
+      setAsmBusy(false);
+    }
+  };
+  const onMateCancel = () => setMate((m) => (m ? { ...MATE_START } : m));
+
+  // an applied mate's preview stays until the result for the new layout lands
+  useEffect(() => {
+    if (pendingMotion && resultLayout === pendingMotion.layout) setPendingMotion(null);
+  }, [resultLayout, pendingMotion]);
+  // fewer than two files: nothing to assemble
+  useEffect(() => {
+    if (asmItems.length < 2 && activeTool === 'assemble') {
+      setActiveTool(null);
+      setMate(null);
+    }
+  }, [asmItems.length, activeTool]);
+
+  // Ctrl/Cmd+Z while the Assemble tool is active undoes the last assembly change
+  const undoAsmRef = useRef(onUndoAssembly);
+  undoAsmRef.current = onUndoAssembly;
+  useEffect(() => {
+    if (activeTool !== 'assemble') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.key.toLowerCase() !== 'z') return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      e.preventDefault();
+      undoAsmRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeTool]);
+
+  const movingKeys = useMemo(() => (mate?.moving ? partKeysOf(mate.moving.itemId) : []), [mate, asmSources]); // eslint-disable-line react-hooks/exhaustive-deps
+  const partMotion = useMemo<PartMotion | null>(
+    () => (matePreview && movingKeys.length ? { keys: movingKeys, R: matePreview.R, t: matePreview.t } : pendingMotion),
+    [matePreview, movingKeys, pendingMotion],
+  );
+  const mateFaces = useMemo<MateFace[]>(() => {
+    const out: MateFace[] = [];
+    if (mate?.moving) out.push({ ...mate.moving, color: MOVING_COLOR });
+    if (mate?.target) out.push({ ...mate.target, color: TARGET_COLOR });
+    return out;
+  }, [mate]);
+  const fileName = (id: string | null | undefined) => (id ? (asmItems.find((it) => it.itemId === id)?.fileName ?? null) : null);
+  const matePanel: MatePanel | null = mate
+    ? {
+        step: mate.step,
+        movingName: fileName(mate.moving?.itemId ?? movingItemId),
+        targetName: fileName(mate.target?.itemId),
+        offset: mate.offset,
+        flip: mate.flip,
+        angle: mate.angle,
+        updating: asmUpdating,
+      }
+    : null;
+  const fileRows: AssemblyFileRow[] = asmItems.map((it) => {
+    const keys = partKeysOf(it.itemId);
+    return { itemId: it.itemId, fileName: it.fileName, parts: it.parts, triangles: it.triangles, hidden: keys.length > 0 && keys.every((k) => hiddenParts.has(k)) };
+  });
+  const onSelectFile = (itemId: string) => {
+    setMovingItemId(itemId);
+    if (asmItems.length >= 2 && activeTool !== 'assemble') onToolChange('assemble');
+  };
 
   // The header title shows what's loaded: the model's file name, else the picked camo's name, else the image's.
   const presetName = selectedPresetId ? (presets?.items.find((p) => p.id === selectedPresetId)?.name ?? null) : null;
@@ -855,8 +1205,14 @@ export default function App() {
                   presetBusy={presetBusy}
                   selectedPresetId={selectedPresetId}
                   model={model}
-                  onModel={onModel}
+                  files={fileRows}
+                  movingItemId={movingItemId}
+                  onAddModels={onAddModels}
+                  onReplaceModels={onReplaceModels}
                   onClearModel={onClearModel}
+                  onToggleFile={onToggleFile}
+                  onSelectFile={onSelectFile}
+                  onRemoveFile={onRemoveFile}
                 />
               </div>
               <div role="tabpanel" id="panel-design" aria-labelledby="tab-design" hidden={tab !== 'design'}>
@@ -936,13 +1292,16 @@ export default function App() {
                   activeTool={mode === 'paint' && hasResult ? activeTool : null}
                   toolsPaused={busy}
                   paintedFaces={params.paintedFaces}
-                  modelToken={modelToken}
+                  modelToken={geomToken}
                   brush={brush}
                   onLayPick={onLayPick}
                   onPaintStroke={onPaintStroke}
                   textures={params.textures}
                   textureErase={textureErase}
                   onTextureStroke={onTextureStroke}
+                  onAssemblePick={onAssemblePick}
+                  mateFaces={mateFaces}
+                  partMotion={partMotion}
                 />
               </div>
 
@@ -960,6 +1319,13 @@ export default function App() {
                   textureErase={textureErase}
                   onTextureErase={setTextureErase}
                   paused={busy && showLoading}
+                  assembleAvailable={asmItems.length >= 2}
+                  mate={matePanel}
+                  onMateParams={(patch) => setMate((m) => (m ? { ...m, ...patch } : m))}
+                  onMateApply={onMateApply}
+                  onMateCancel={onMateCancel}
+                  canUndoAssembly={asmHistory.length > 0 && !asmBusy}
+                  onUndoAssembly={onUndoAssembly}
                 />
               )}
 

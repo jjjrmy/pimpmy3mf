@@ -17,8 +17,27 @@ interface PaintTabProps {
   selectedPresetId: string | null;
   /** Model section (loading a model switches to paint mode; clearing returns to image mode). */
   model: ModelSummary | null;
-  onModel: (f: File) => void;
+  /** Assembly files in order (empty = no model). */
+  files: AssemblyFileRow[];
+  /** The Assemble tool's moving file, or null. */
+  movingItemId: string | null;
+  /** Adds files to the assembly (the first one loads like a single model). */
+  onAddModels: (files: File[]) => void;
+  /** Drops everything and loads these files instead. */
+  onReplaceModels: (files: File[]) => void;
   onClearModel: () => void;
+  onToggleFile: (itemId: string) => void;
+  onSelectFile: (itemId: string) => void;
+  onRemoveFile: (itemId: string) => void;
+}
+
+export interface AssemblyFileRow {
+  itemId: string;
+  fileName: string;
+  parts: number;
+  triangles: number;
+  /** Every part of the file is hidden in the 3D view. */
+  hidden: boolean;
 }
 
 /** PAINT tab: the model, and the camo / image the print is painted with. */
@@ -27,51 +46,112 @@ export function PaintTab(props: PaintTabProps) {
   const modelInputRef = useRef<HTMLInputElement>(null);
   // The upload circle is "selected" when the current camo is a user image (not a camo preset).
   const uploadSelected = !!props.image && !props.selectedPresetId;
-  const { model } = props;
+  const { model, files } = props;
   const parts = model ? model.objects.reduce((n, o) => n + o.parts.length, 0) : 0;
+  const multi = files.length > 1;
+  // the one file input serves Add (append) and Replace all
+  const replacing = useRef(false);
+  const pick = (replace: boolean) => {
+    replacing.current = replace;
+    modelInputRef.current?.click();
+  };
 
   return (
     <div className="tab-body">
       {/* ---- model ---- */}
       <section className="control-group">
-        <h3 className="tab-subhead">Model</h3>
+        <h3 className="tab-subhead">{files.length > 1 ? 'Assembly' : 'Model'}</h3>
         <input
           ref={modelInputRef}
           type="file"
           accept={MODEL_ACCEPT}
+          multiple
           hidden
           onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) props.onModel(file);
+            const picked = Array.from(e.target.files ?? []);
+            if (picked.length) (replacing.current ? props.onReplaceModels : props.onAddModels)(picked);
             e.target.value = '';
           }}
         />
-        {model ? (
-          <div className="model-row">
-            <div className="model-icon" aria-hidden>
-              <Icon name="cube" />
-            </div>
-            <div className="model-meta">
-              <div className="model-name" title={model.name}>
-                {model.name}
+        {files.length > 0 && model ? (
+          <>
+            <ul className="asm-files" aria-label="Model files">
+              {files.map((f) => {
+                const moving = f.itemId === props.movingItemId && multi;
+                return (
+                  <li key={f.itemId} className={`model-row asm-row${moving ? ' is-moving' : ''}${f.hidden ? ' is-hidden' : ''}`}>
+                    <div className="model-icon" aria-hidden>
+                      <Icon name="cube" />
+                    </div>
+                    <div className="model-meta">
+                      <div className="model-name" title={f.fileName}>
+                        {f.fileName}
+                      </div>
+                      <div className="dim">
+                        {!multi && model.objects.length > 1 && `${model.objects.length} objects · `}
+                        {f.parts > 1 ? `${f.parts} parts · ` : ''}
+                        {f.triangles.toLocaleString()} triangles
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-x asm-btn"
+                      title={f.hidden ? 'Show file' : 'Hide file'}
+                      aria-label={`${f.hidden ? 'Show' : 'Hide'} ${f.fileName}`}
+                      aria-pressed={!f.hidden}
+                      onClick={() => props.onToggleFile(f.itemId)}
+                    >
+                      <Icon name={f.hidden ? 'eye-off' : 'eye'} />
+                    </button>
+                    {multi && (
+                      <button
+                        type="button"
+                        className={`icon-x asm-btn${moving ? ' is-active' : ''}`}
+                        title="Move this file (Assemble)"
+                        aria-label={`Move ${f.fileName}`}
+                        aria-pressed={moving}
+                        onClick={() => props.onSelectFile(f.itemId)}
+                      >
+                        <Icon name="target" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="icon-x"
+                      title="Remove file"
+                      aria-label={`Remove ${f.fileName}`}
+                      onClick={() => (multi ? props.onRemoveFile(f.itemId) : props.onClearModel())}
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            {multi && (
+              <div className="dim asm-total">
+                {parts} parts · {model.triangles.toLocaleString()} triangles
               </div>
-              <div className="dim">
-                {model.objects.length > 1 && `${model.objects.length} objects · `}
-                {parts > 1 ? `${parts} parts · ` : ''}
-                {model.triangles.toLocaleString()} triangles
-              </div>
+            )}
+            <div className="asm-actions">
+              <button type="button" className="btn-ghost" onClick={() => pick(false)} title="Add another file and mate it to this one">
+                <Icon name="plus" /> Add model
+              </button>
+              <button type="button" className="btn-ghost" onClick={() => pick(true)} title="Remove every file and load new ones">
+                Replace all
+              </button>
+              <button type="button" className="btn-ghost" onClick={props.onClearModel} title="Remove every file">
+                Clear all
+              </button>
             </div>
-            <button type="button" className="icon-x" title="Remove model" aria-label="Remove model" onClick={props.onClearModel}>
-              <Icon name="close" />
-            </button>
-          </div>
+          </>
         ) : (
           <div className="model-row model-row-empty">
             <div className="model-meta">
               <div className="model-name">No model</div>
               <div className="dim">Drop an STL / 3MF / OBJ anywhere to paint it.</div>
             </div>
-            <button type="button" className="btn-chunky btn-chunky-sm" onClick={() => modelInputRef.current?.click()}>
+            <button type="button" className="btn-chunky btn-chunky-sm" onClick={() => pick(false)}>
               Upload model
             </button>
           </div>

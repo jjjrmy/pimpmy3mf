@@ -56,9 +56,32 @@ interface Viewer3DProps {
   textureErase: boolean;
   /** A texture-face stroke finished: every smooth region it crossed (`erase` = remove textures there). */
   onTextureStroke: (regions: FacePick[], erase: boolean) => void;
+  /** A face was clicked with the Assemble tool. */
+  onAssemblePick?: (pick: FacePick) => void;
+  /** Assemble: the chosen moving / target faces, drawn in their own colors. */
+  mateFaces?: MateFace[];
+  /** Assemble preview: a rigid motion (result.model coordinates) shown on these parts (`${j}:${k}`) without a re-run. */
+  partMotion?: PartMotion | null;
+}
+
+export interface MateFace {
+  objectIndex: number;
+  partIndex: number;
+  triangles: number[];
+  /** CSS color. */
+  color: string;
+}
+
+export interface PartMotion {
+  keys: string[];
+  /** Row-major 3x3 rotation and translation: x' = R·x + t. */
+  R: number[];
+  t: Vec3;
 }
 
 interface Scene {
+  /** Assemble: moving / target face overlays. */
+  mateMeshes?: { mesh: THREE.Mesh; key: string }[];
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -266,6 +289,9 @@ export function Viewer3D({
   textures,
   textureErase,
   onTextureStroke,
+  onAssemblePick,
+  mateFaces,
+  partMotion,
 }: Viewer3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -284,6 +310,10 @@ export function Viewer3D({
   modelTokenRef.current = modelToken;
   const onLayRef = useRef(onLayPick);
   onLayRef.current = onLayPick;
+  const onAssembleRef = useRef(onAssemblePick);
+  onAssembleRef.current = onAssemblePick;
+  const partMotionRef = useRef(partMotion);
+  partMotionRef.current = partMotion;
   const onStrokeRef = useRef(onPaintStroke);
   onStrokeRef.current = onPaintStroke;
   const brushRef = useRef(brush);
@@ -730,6 +760,72 @@ export function Viewer3D({
     }
   }, [hexes, hidden, hiddenParts, showModifiers, result, paintedFaces]);
 
+  // ---- assemble: moving / target face overlays ------------------------------------------------
+  useEffect(() => {
+    const b = sceneRef.current;
+    if (!b) return;
+    for (const { mesh } of b.mateMeshes ?? []) {
+      b.objectGroup.remove(mesh);
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+    }
+    b.mateMeshes = [];
+    if (!result?.model || !mateFaces?.length) return;
+    for (const f of mateFaces) {
+      const part = result.model.objects[f.objectIndex]?.parts[f.partIndex];
+      if (!part) continue;
+      const mesh = new THREE.Mesh(
+        subGeometry(part.mesh, f.triangles, liftFor(f.objectIndex, f.partIndex)),
+        new THREE.MeshBasicMaterial({
+          color: new THREE.Color(f.color),
+          transparent: true,
+          opacity: 0.75,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: -3,
+          polygonOffsetUnits: -3,
+          toneMapped: false,
+        }),
+      );
+      b.mateMeshes.push({ mesh, key: `${f.objectIndex}:${f.partIndex}` });
+      b.objectGroup.add(mesh);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, mateFaces]);
+
+  // ---- assemble preview: move the moving file's meshes in place (declared after every effect that builds them) --
+  useEffect(() => {
+    const b = sceneRef.current;
+    if (!b) return;
+    const moved = new Set(partMotion?.keys ?? []);
+    const m = new THREE.Matrix4();
+    if (partMotion) {
+      const { R, t } = partMotion;
+      m.set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1);
+    }
+    const place = (mesh: THREE.Object3D, key: string) => {
+      if (moved.has(key)) {
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.copy(m);
+      } else {
+        mesh.matrixAutoUpdate = true;
+        mesh.matrix.identity();
+      }
+      mesh.matrixWorldNeedsUpdate = true;
+    };
+    for (const [key, mesh] of b.partMeshes) place(mesh, key);
+    for (const [key, mesh] of b.pickMeshes) if (mesh !== b.partMeshes.get(key)) place(mesh, key);
+    for (const face of paintedFaces) {
+      const mesh = b.faceMeshes.get(face.id);
+      if (mesh) place(mesh, `${face.objectIndex}:${face.partIndex}`);
+    }
+    for (const s of b.skinMeshes) place(s.mesh, s.key);
+    for (const s of b.innerMeshes) place(s.mesh, s.key);
+    for (const s of b.mateMeshes ?? []) place(s.mesh, s.key);
+    b.objectGroup.updateMatrixWorld(true);
+  }, [result, paintedFaces, mateFaces, partMotion]);
+
   // ---- active tool: crosshair cursor + hover highlight + click picking ------------------------
   useEffect(() => {
     const b = sceneRef.current;
@@ -856,6 +952,13 @@ export function Viewer3D({
           toneMapped: false,
         }),
       );
+      // follow an assemble preview that has moved this part
+      const motion = partMotionRef.current;
+      if (motion?.keys.includes(`${pick.objectIndex}:${pick.partIndex}`)) {
+        const { R, t } = motion;
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1);
+      }
       b.highlight = mesh;
       b.objectGroup.add(mesh);
     };
@@ -952,10 +1055,11 @@ export function Viewer3D({
         } else clearStrokePreview();
         return;
       }
-      // lay-on-face is click-only: a small move = a click (a drag orbited)
-      if (toolRef.current === 'lay' && wasActive && !pausedRef.current && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
+      // lay-on-face and assemble are click-only: a small move = a click (a drag orbited)
+      const clickTool = toolRef.current === 'lay' || toolRef.current === 'assemble';
+      if (clickTool && wasActive && !pausedRef.current && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
         const pick = pickAt(e.clientX, e.clientY);
-        if (pick) onLayRef.current(pick);
+        if (pick) (toolRef.current === 'lay' ? onLayRef.current : onAssembleRef.current)?.(pick);
       }
     };
     const onPointerLeave = () => {

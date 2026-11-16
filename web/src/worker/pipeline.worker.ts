@@ -7,6 +7,7 @@
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { zipSync } from 'fflate';
 
+import { composeAssembly, placeBeside, type AssemblyItem } from '../core/assembly';
 import { createPipeline } from '../core/pipeline';
 import { initManifold } from '../core/manifold';
 import { loadModel, writeStl } from '../core/meshio';
@@ -14,7 +15,7 @@ import { objectsFromResult, writeBambuProject, writePlain3mf } from '../core/thr
 import type { Model, Pipeline, RasterImage, Result } from '../core/types';
 
 import { drawColorMap, fadeOutsideSilhouette, mapScale, type MapRegion } from '../ui/colorMap';
-import type { ExportOpts, ExportResult, Request, Response } from './messages';
+import type { ExportOpts, ExportResult, ModelInfo, Request, Response } from './messages';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -23,6 +24,8 @@ let image: RasterImage | null = null;
 let imageStem = 'image';
 let model: Model | null = null;
 let modelStem = 'model';
+/** Assemble mode: the loaded files (as parsed) and their placements; `model` is their composition. */
+let items: AssemblyItem[] = [];
 let lastResult: Result | null = null;
 let currentSignal: { cancelled: boolean } | null = null;
 
@@ -151,12 +154,21 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
     case 'bambu-3mf': {
       const objects = objectsFromResult(result, hexes, imageStem);
       const thumbnailPng = await renderThumbnail(result, hexes);
-      const { bytes, warnings } = await writeBambuProject(objects, {
+      const { bytes, warnings: raw } = await writeBambuProject(objects, {
         printerId: opts.printerId,
         filamentColors: hexes,
         plate: opts.plate,
         thumbnailPng,
       });
+      // an assembly split per part is expected to be laid out flat and apart: say so instead of flagging it
+      const warnings =
+        items.length > 1 && objects.length > 1
+          ? raw.map((w) =>
+              /re-arranged/.test(w) && /overlap|resting on the bed/.test(w)
+                ? 'Parts are laid out to print separately; the camo still lines up when assembled.'
+                : w,
+            )
+          : raw;
       return { filename: `${base}-${n}colors.3mf`, bytes, mime: 'model/3mf', warnings };
     }
     case 'preview-png': {
@@ -167,6 +179,39 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
     default:
       throw new Error(`Unknown export kind: ${kind}`);
   }
+}
+
+// ---- assembly -------------------------------------------------------------------------------
+
+function countTriangles(m: Model): number {
+  let n = 0;
+  for (const o of m.objects) for (const p of o.parts) n += p.mesh.triangles.length / 3;
+  return n;
+}
+
+/** Recompose `model` from the items and describe it (same shape as a single-file load). */
+function recompose(): ModelInfo {
+  lastResult = null;
+  if (!items.length) {
+    model = null;
+    modelStem = 'model';
+    return { triangles: 0, objects: [], sources: [], items: [] };
+  }
+  const composed = composeAssembly(items);
+  model = composed.model;
+  modelStem = items.length === 1 ? safeStem(items[0].fileName) : 'assembly';
+  return {
+    triangles: countTriangles(model),
+    objects: model.objects.map((o) => ({ name: o.name, parts: o.parts.map((p) => p.name) })),
+    sources: composed.sources,
+    items: items.map((it) => ({
+      itemId: it.id,
+      fileName: it.fileName,
+      transform: { R: it.transform.R.slice(), t: [...it.transform.t] as [number, number, number] },
+      parts: it.model.objects.reduce((n, o) => n + o.parts.length, 0),
+      triangles: countTriangles(it.model),
+    })),
+  };
 }
 
 // ---- message loop ----------------------------------------------------------------------------
@@ -183,19 +228,36 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
         break;
       }
       case 'setModel': {
-        modelStem = safeStem(msg.filename);
+        // replace the whole assembly with this one file, kept exactly as loaded
         const loaded: Model = loadModel(new Uint8Array(msg.bytes), msg.filename);
-        model = loaded;
-        lastResult = null;
-        let triangles = 0;
-        for (const o of loaded.objects) for (const p of o.parts) triangles += p.mesh.triangles.length / 3;
-        const objects = loaded.objects.map((o) => ({ name: o.name, parts: o.parts.map((p) => p.name) }));
-        post({ type: 'setModel:ok', reqId: msg.reqId, info: { triangles, objects } });
+        items = [{ id: msg.itemId ?? 'model', fileName: msg.filename, model: loaded, transform: { R: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [0, 0, 0] } }];
+        post({ type: 'setModel:ok', reqId: msg.reqId, info: recompose() });
+        break;
+      }
+      case 'addModelFile': {
+        const loaded: Model = loadModel(new Uint8Array(msg.bytes), msg.filename);
+        const transform = placeBeside(items, loaded);
+        items = [...items.filter((it) => it.id !== msg.itemId), { id: msg.itemId, fileName: msg.filename, model: loaded, transform }];
+        post({ type: 'assembly:ok', reqId: msg.reqId, info: recompose() });
+        break;
+      }
+      case 'removeModelFile': {
+        items = items.filter((it) => it.id !== msg.itemId);
+        post({ type: 'assembly:ok', reqId: msg.reqId, info: recompose() });
+        break;
+      }
+      case 'setPlacements': {
+        const byId = new Map(msg.placements.map((p) => [p.itemId, p]));
+        items = items.map((it) => {
+          const p = byId.get(it.id);
+          return p ? { ...it, transform: { R: p.R.slice(), t: [p.t[0], p.t[1], p.t[2]] } } : it;
+        });
+        post({ type: 'assembly:ok', reqId: msg.reqId, info: recompose() });
         break;
       }
       case 'clearModel': {
-        model = null;
-        lastResult = null;
+        items = [];
+        recompose();
         post({ type: 'clearModel:ok', reqId: msg.reqId });
         break;
       }
@@ -232,6 +294,7 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
         pipeline = null;
         image = null;
         model = null;
+        items = [];
         lastResult = null;
         post({ type: 'dispose:ok', reqId: msg.reqId });
         break;
