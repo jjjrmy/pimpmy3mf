@@ -898,27 +898,23 @@ def tower_rect(x, y, t):
     return (x - lo, y - lo, x - t["brim"] + t["size"][0] + 3, y - t["brim"] + t["size"][1] + 3)
 
 
-def find_tower_spot(t, occupied):
-    """Plate-local tower origin (x, y) on the bed, 2 mm clear of every exclusion polygon and 3 mm clear of
-    the occupied rects (x0, y0, x1, y1). Tries the back-left and back-right corners, the left and right
-    strips back to front, the back strip, the front strip (right first), then a grid. None if nothing fits."""
+_TOWER_CANDS = {}
+
+
+def _tower_candidates(t):
+    """find_tower_spot's candidate origins in search order, their footprints and which of them clear the
+    exclusion polygons (cached per spec: centre_group calls find_tower_spot for many group positions)."""
+    key = repr((t["size"], t["brim"], t["bed"], t["exclude"]))
+    if key in _TOWER_CANDS:
+        return _TOWER_CANDS[key]
     bx0, by0, bx1, by1 = t["bed"]
-    if t["size"][0] <= 0:
-        return bx0 + 15, by0 + 15
     m, lo = 2, t["brim"] + 3
     xmin, ymin = bx0 + m + lo, by0 + m + lo
     xmax = bx1 - m - (t["size"][0] - t["brim"] + 3)
     ymax = by1 - m - (t["size"][1] - t["brim"] + 3)
     if xmax < xmin or ymax < ymin:
+        _TOWER_CANDS[key] = None
         return None
-
-    def fits(x, y):
-        r = tower_rect(x, y, t)
-        grown = (r[0] - 2, r[1] - 2, r[2] + 2, r[3] + 2)
-        if any(rect_hits_poly(grown, p) for p in t["exclude"]):
-            return False
-        return not any(r[0] < o[2] + 3 and o[0] - 3 < r[2] and r[1] < o[3] + 3 and o[1] - 3 < r[3]
-                       for o in occupied)
 
     def steps(a, b, s):
         out, v = [], a
@@ -936,8 +932,87 @@ def find_tower_spot(t, occupied):
     cands += [(xmin, y) for y in steps(ymax, ymin, 2)] + [(xmax, y) for y in steps(ymax, ymin, 2)]
     cands += [(x, ymax) for x in steps(xmin, xmax, 2)] + [(x, ymin) for x in steps(xmax, xmin, 2)]
     cands += [(x, y) for y in steps(ymax, ymin, 4) for x in steps(xmin, xmax, 4)]
-    hit = next((c for c in cands if fits(*c)), None)
-    return (round(hit[0], 2), round(hit[1], 2)) if hit else None
+    rects = np.array([tower_rect(x, y, t) for x, y in cands])
+    ok = np.array([not any(rect_hits_poly((x0 - 2, y0 - 2, x1 + 2, y1 + 2), p) for p in t["exclude"])
+                   for x0, y0, x1, y1 in rects.tolist()], bool)
+    _TOWER_CANDS[key] = (cands, rects, ok)
+    return _TOWER_CANDS[key]
+
+
+def find_tower_spot(t, occupied):
+    """Plate-local tower origin (x, y) on the bed, 2 mm clear of every exclusion polygon and 3 mm clear of
+    the occupied rects (x0, y0, x1, y1). Tries the back-left and back-right corners, the left and right
+    strips back to front, the back strip, the front strip (right first), then a grid. None if nothing fits."""
+    bx0, by0, bx1, by1 = t["bed"]
+    if t["size"][0] <= 0:
+        return bx0 + 15, by0 + 15
+    c = _tower_candidates(t)
+    if c is None:
+        return None
+    cands, r, ok = c
+    if len(occupied):
+        o = np.asarray(occupied, float)
+        hit = ((r[:, None, 0] < o[None, :, 2] + 3) & (o[None, :, 0] - 3 < r[:, None, 2])
+               & (r[:, None, 1] < o[None, :, 3] + 3) & (o[None, :, 1] - 3 < r[:, None, 3])).any(1)
+        ok = ok & ~hit
+    i = np.flatnonzero(ok)
+    if not len(i):
+        return None
+    hit = cands[i[0]]
+    return round(hit[0], 2), round(hit[1], 2)
+
+
+def centre_group(rects, spec):
+    """Centre a group of footprints (plate-local rects x0, y0, x1, y1) on the printable area and find it a
+    prime-tower spot. When the centred group leaves no spot, move it the smallest distance (2 mm steps,
+    staying 5 mm inside the bed) that frees one. Returns (dx, dy) to add to the rects, the tower spot (None
+    if none even after shifting) and how far the group sits off centre (0 = centred)."""
+    gx0, gy0 = min(r[0] for r in rects), min(r[1] for r in rects)
+    gx1, gy1 = max(r[2] for r in rects), max(r[3] for r in rects)
+    bx0, by0, bx1, by1 = spec["bed"]
+    dx0, dy0 = (bx0 + bx1) / 2 - (gx0 + gx1) / 2, (by0 + by1) / 2 - (gy0 + gy1) / 2
+
+    def at(dx, dy):
+        return [(r[0] + dx, r[1] + dy, r[2] + dx, r[3] + dy) for r in rects]
+
+    spot = find_tower_spot(spec, at(dx0, dy0))
+    if spot or spec["size"][0] <= 0:
+        return dx0, dy0, spot, 0.0
+    m = 5
+    sx_lo, sx_hi = bx0 + m - (gx0 + dx0), bx1 - m - (gx1 + dx0)
+    sy_lo, sy_hi = by0 + m - (gy0 + dy0), by1 - m - (gy1 + dy0)
+    if sx_lo > 0 or sx_hi < 0 or sy_lo > 0 or sy_hi < 0:          # bigger than the bed
+        return dx0, dy0, None, 0.0
+    # a tower strip beside the group needs size + 11 mm (find_tower_spot's margins); skip the search when
+    # even pushing the group to one edge can't open one
+    room_x, room_y = (bx1 - bx0) - (gx1 - gx0) - m, (by1 - by0) - (gy1 - gy0) - m
+    if room_x < spec["size"][0] + 11 and room_y < spec["size"][1] + 11:
+        return dx0, dy0, None, 0.0
+    step = 2
+
+    def rng(lo, hi):
+        out = [0]
+        v = step
+        while v <= hi:
+            out.append(v)
+            v += step
+        v = -step
+        while v >= lo:
+            out.append(v)
+            v -= step
+        if hi > 0 and hi not in out:
+            out.append(hi)
+        if lo < 0 and lo not in out:
+            out.append(lo)
+        return out
+
+    shifts = [(sx, sy) for sx in rng(sx_lo, sx_hi) for sy in rng(sy_lo, sy_hi) if sx or sy]
+    shifts.sort(key=lambda p: math.hypot(*p))
+    for sx, sy in shifts:
+        s = find_tower_spot(spec, at(dx0 + sx, dy0 + sy))
+        if s:
+            return dx0 + sx, dy0 + sy, s, math.hypot(sx, sy)
+    return dx0, dy0, None, 0.0
 
 
 def tower_fallback(t):
@@ -976,42 +1051,75 @@ def pad_filament_lists(project, binary, filament, n):
 
 
 def place_towers(project, pw, pd, spec, restore):
-    """After Bambu's arrange, give each plate's prime tower a free spot of its own (find_tower_spot
-    against that plate's objects and the machine's real exclusion polygons) and put back the project
-    settings in restore. Bambu keeps tower positions per plate (wipe_tower_x/y lists). Plates sit in a
-    grid of ceil(sqrt(n)) columns, 1.2 plate sizes apart. Returns (plate numbers with no free spot, spots)."""
+    """After Bambu's arrange, centre each plate's objects on its printable area, give the plate's prime
+    tower a free spot of its own (centre_group: find_tower_spot against the objects and the machine's real
+    exclusion polygons, moving the group the least distance off centre when centred leaves none) and put
+    back the project settings in restore. Objects move by their build-item transforms; Bambu keeps tower
+    positions per plate (wipe_tower_x/y lists). Plates sit in a grid of ceil(sqrt(n)) columns, 1.2 plate
+    sizes apart. Returns (plate numbers with no free spot, spots, per-plate shift off centre in mm)."""
     z = zipfile.ZipFile(project)
     cfg = json.loads(z.read("Metadata/project_settings.config"))
     cfg.update(restore)
-    plates = [re.findall(r'key="object_id" value="(\d+)"', p) for p in
-              re.findall(r"<plate>(.*?)</plate>", z.read("Metadata/model_settings.config").decode(), re.S)]
     boxes = {}
     for o in load_3mf(Path(project)):
         v = np.concatenate([p["v"] for p in o["parts"]])
         boxes[o["id"]] = (v[:, :2].min(0), v[:, :2].max(0))
+    plates = [re.findall(r'key="object_id" value="(\d+)"', p) for p in
+              re.findall(r"<plate>(.*?)</plate>", z.read("Metadata/model_settings.config").decode(), re.S)]
+    if not plates:
+        plates = [list(boxes)]
     cols = math.ceil(math.sqrt(len(plates)))
-    xs, ys, bad, spots = [], [], [], []
+    xs, ys, bad, spots, shifts, moves = [], [], [], [], [], {}
     for i, ids in enumerate(plates):
         origin = np.array([(i % cols) * pw * 1.2, -(i // cols) * pd * 1.2])
         local = [(*(boxes[j][0] - origin), *(boxes[j][1] - origin)) for j in ids if j in boxes]
-        spot = find_tower_spot(spec, local)
+        if local:
+            dx, dy, spot, shift = centre_group(local, spec)
+            if spot is not None:
+                for j in ids:
+                    moves[j] = (dx, dy)
+            # else: no tower spot even off centre; keep Bambu's arranged placement (next to the fenced tower
+            # strip), which leaves the tower the most room in practice
+        else:
+            spot, shift = find_tower_spot(spec, []), 0.0
         if spot is None:
             bad.append(i + 1)
             spot = tower_fallback(spec)
         spots.append(spot)
+        shifts.append(shift)
         xs.append(f"{spot[0]:g}")
         ys.append(f"{spot[1]:g}")
     cfg["wipe_tower_x"], cfg["wipe_tower_y"] = xs, ys
+
+    def move_item(m):
+        item = m.group(0)
+        oid = re.search(r'objectid="(\d+)"', item)
+        tf = re.search(r'transform="([^"]*)"', item)
+        if not oid or oid.group(1) not in moves:
+            return item
+        dx, dy = moves[oid.group(1)]
+        t = [float(c) for c in tf.group(1).split()] if tf else [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+        t[9] += dx
+        t[10] += dy
+        val = " ".join(f"{c:.6f}".rstrip("0").rstrip(".") if c else "0" for c in t)
+        if tf:
+            return item[:tf.start(1)] + val + item[tf.end(1):]
+        return item.replace("<item ", f'<item transform="{val}" ', 1)
+
     tmp = project + ".tmp"
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
         for info in z.infolist():
             data = z.read(info.filename)
             if info.filename == "Metadata/project_settings.config":
                 data = json.dumps(cfg, indent=4).encode()
+            elif info.filename == "3D/3dmodel.model":
+                txt = data.decode()
+                bs = txt.find("<build")
+                data = (txt[:bs] + re.sub(r"<item\b[^>]*>", move_item, txt[bs:])).encode()
             out.writestr(info, data)
     z.close()
     os.replace(tmp, project)
-    return bad, spots
+    return bad, spots, shifts
 
 
 def fill_from_installed(objects, project, hexes, args, binary, say):
@@ -1114,11 +1222,8 @@ def bambu_project(objects, out_3mf, hexes, args, binary=None, quiet=False):
     # (X1/P1: the purge-chute corner at the front-left), searched over the centered layout.
     multi = len(hexes) > 1
     spec = tower_spec(machine, process, filament, len(hexes))
-    center = np.array([pw / 2 - (lo[0] + hi[0]) / 2, pd / 2 - (lo[1] + hi[1]) / 2, -lo[2]])
-
-    def search(off):
-        return find_tower_spot(spec, [(b[0][0] + off[0], b[0][1] + off[1], b[1][0] + off[0], b[1][1] + off[1])
-                                      for b in boxes])
+    bx0, by0, bx1, by1 = spec["bed"]
+    center = np.array([(bx0 + bx1) / 2 - (lo[0] + hi[0]) / 2, (by0 + by1) / 2 - (lo[1] + hi[1]) / 2, -lo[2]])
 
     # Kept layout: the objects, centered on the plate, are printable as they are: they fit next to
     # the prime tower, don't overlap from above and all stand on the bed. Otherwise (an assembly
@@ -1132,17 +1237,11 @@ def bambu_project(objects, out_3mf, hexes, args, binary=None, quiet=False):
         grounded = all(b[0][2] - lo[2] < 0.01 for b in boxes)
         keepable = footprint[0] <= pw - 10 and footprint[1] <= pd - 10 and not overlap and grounded
     if multi and keepable:
-        spot = search(center)
-        if not spot:
-            # no room when centered: slide the whole group right (then also back / front) and retry
-            rx = pw - 5 - hi[0]
-            for off, where in ((np.array([rx, center[1], center[2]]), "right"),
-                               (np.array([rx, pd - 5 - hi[1], center[2]]), "right and back"),
-                               (np.array([rx, 5 - lo[1], center[2]]), "right and front")):
-                spot = search(off)
-                if spot:
-                    offset, moved = off, f"model moved {where} to make room for the prime tower"
-                    break
+        # centred when that leaves a tower spot, else moved the least distance that frees one
+        dx, dy, spot, shift = centre_group([(b[0][0], b[0][1], b[1][0], b[1][1]) for b in boxes], spec)
+        if spot and shift > 0:
+            offset = np.array([dx, dy, -lo[2]])
+            moved = f"model moved {shift:.0f} mm off centre to make room for the prime tower"
     if len(objects) > 1:
         if keepable and (not multi or spot):
             note = "layout kept"
@@ -1207,8 +1306,12 @@ def bambu_project(objects, out_3mf, hexes, args, binary=None, quiet=False):
     pad_filament_lists(out_abs, binary, filament, len(hexes))
     fill_from_installed(objects, out_abs, hexes, orig_args, binary, say)
     if multi and arrange == "1":
-        bad, spots = place_towers(out_abs, pw, pd, spec, {"bed_exclude_area": keep_exclude})
+        bad, spots, shifts = place_towers(out_abs, pw, pd, spec, {"bed_exclude_area": keep_exclude})
         note += "; prime tower at " + ", ".join(f"({x:g}, {y:g})" for x, y in spots)
+        for i, sh in enumerate(shifts):
+            if sh > 0:
+                say(f"note: plate {i + 1}: objects moved {sh:.0f} mm off centre to make room for the prime tower")
+                note += f"; plate {i + 1} moved {sh:.0f} mm off centre"
         if bad:
             say(f"note: no free spot for the prime tower on plate {', '.join(map(str, bad))}; "
                 f"move it in Bambu Studio")

@@ -623,12 +623,62 @@ function findTowerSpot(t: TowerSpec, occupied: Rect[]): { x: number; y: number }
   return hit ? { x: r(hit[0]), y: r(hit[1]) } : null;
 }
 
+/**
+ * Centre a group of footprints (plate-local rects) on the printable area and find it a prime-tower spot. When the
+ * centred group leaves no spot, move it the smallest distance (2 mm steps, staying 5 mm inside the bed) that frees
+ * one. Returns the offset to apply to the rects, the tower spot (null if none even after shifting) and how far the
+ * group was moved off centre (0 = centred).
+ */
+function centreGroup(rects: Rect[], spec: TowerSpec): { dx: number; dy: number; spot: { x: number; y: number } | null; shift: number } {
+  const g = {
+    x0: Math.min(...rects.map((r) => r.x0)), y0: Math.min(...rects.map((r) => r.y0)),
+    x1: Math.max(...rects.map((r) => r.x1)), y1: Math.max(...rects.map((r) => r.y1)),
+  };
+  const b = spec.bed;
+  const dx0 = (b.x0 + b.x1) / 2 - (g.x0 + g.x1) / 2;
+  const dy0 = (b.y0 + b.y1) / 2 - (g.y0 + g.y1) / 2;
+  const at = (dx: number, dy: number): Rect[] => rects.map((r) => ({ x0: r.x0 + dx, y0: r.y0 + dy, x1: r.x1 + dx, y1: r.y1 + dy }));
+  const spot = findTowerSpot(spec, at(dx0, dy0));
+  if (spot || spec.size[0] <= 0) return { dx: dx0, dy: dy0, spot, shift: 0 };
+
+  // how far the centred group may move and stay 5 mm inside the bed
+  const m = 5;
+  const sxLo = b.x0 + m - (g.x0 + dx0), sxHi = b.x1 - m - (g.x1 + dx0);
+  const syLo = b.y0 + m - (g.y0 + dy0), syHi = b.y1 - m - (g.y1 + dy0);
+  if (sxLo > 0 || sxHi < 0 || syLo > 0 || syHi < 0) return { dx: dx0, dy: dy0, spot: null, shift: 0 }; // bigger than the bed
+  // a tower strip beside the group needs size + 11 mm (findTowerSpot's margins); skip the search when even pushing the
+  // group to one edge can't open one (a multi-rect group's inner gaps were already tried while centred)
+  const needX = spec.size[0] + 11, needY = spec.size[1] + 11;
+  const roomX = (b.x1 - b.x0) - (g.x1 - g.x0) - m, roomY = (b.y1 - b.y0) - (g.y1 - g.y0) - m;
+  if (roomX < needX && roomY < needY) return { dx: dx0, dy: dy0, spot: null, shift: 0 };
+
+  const step = 2;
+  const range = (lo: number, hi: number): number[] => {
+    const out = [0];
+    for (let v = step; v <= hi; v += step) out.push(v);
+    for (let v = -step; v >= lo; v -= step) out.push(v);
+    if (hi > 0 && !out.includes(hi)) out.push(hi);
+    if (lo < 0 && !out.includes(lo)) out.push(lo);
+    return out;
+  };
+  const shifts: [number, number][] = [];
+  for (const sx of range(sxLo, sxHi)) for (const sy of range(syLo, syHi)) if (sx || sy) shifts.push([sx, sy]);
+  shifts.sort((p, q) => Math.hypot(p[0], p[1]) - Math.hypot(q[0], q[1]));
+  for (const [sx, sy] of shifts) {
+    const s = findTowerSpot(spec, at(dx0 + sx, dy0 + sy));
+    if (s) return { dx: dx0 + sx, dy: dy0 + sy, spot: s, shift: Math.hypot(sx, sy) };
+  }
+  return { dx: dx0, dy: dy0, spot: null, shift: 0 };
+}
+
 interface Layout {
   transforms: string[]; // per object: "1 0 0 0 1 0 0 0 1 tx ty tz"
   plates: { towerX: number; towerY: number }[]; // per plate (local plate coords)
   objectPlate: number[]; // per object -> plate index
   rearranged: boolean;
   warnings: string[];
+  /** Per plate: how far its object group sits off the printable-area centre (mm; 0 = centred) to make tower room. */
+  shifts: number[];
 }
 
 const PLATE_GAP = 1.2; // Bambu's plate-grid spacing is 1.2 x bed
@@ -649,13 +699,11 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
   const uMaxX = Math.max(...bounds.map((b) => b.maxX));
   const uMinY = Math.min(...bounds.map((b) => b.minY));
   const uMaxY = Math.max(...bounds.map((b) => b.maxY));
-  // centred assembled layout: every object's footprint on the plate, for the tower search
-  const tx = bed[0] / 2 - (uMinX + uMaxX) / 2;
-  const ty = bed[1] / 2 - (uMinY + uMaxY) / 2;
-  const keptRects = bounds.map((b) => ({ x0: b.minX + tx, y0: b.minY + ty, x1: b.maxX + tx, y1: b.maxY + ty }));
-  // the assembled layout must fit on the plate itself (5 mm margin) before a tower spot even matters
+  // the assembled layout must fit on the plate itself (5 mm margin) before a tower spot even matters. Kept layouts
+  // are centred on the printable area (moved the least needed when the tower would otherwise have no room).
   const fitsBed = uMaxX - uMinX <= bed[0] - 10 && uMaxY - uMinY <= bed[1] - 10;
-  const spot = fitsBed ? findTowerSpot(spec, keptRects) : null;
+  const kept = fitsBed ? centreGroup(bounds.map((b) => ({ x0: b.minX, y0: b.minY, x1: b.maxX, y1: b.maxY })), spec) : null;
+  const spot = kept?.spot ?? null;
 
   let overlap = false;
   for (let i = 0; i < bounds.length && !overlap; i++)
@@ -665,9 +713,9 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
     }
   const allOnBed = bounds.every((b) => b.minZ - globalMinZ <= 0.5);
 
-  if (spot && !overlap && allOnBed) {
-    const t = xform(tx, ty, -globalMinZ);
-    return { transforms: objects.map(() => t), plates: [{ towerX: spot.x, towerY: spot.y }], objectPlate: objects.map(() => 0), rearranged: false, warnings: [] };
+  if (kept && spot && !overlap && allOnBed) {
+    const t = xform(kept.dx, kept.dy, -globalMinZ);
+    return { transforms: objects.map(() => t), plates: [{ towerX: spot.x, towerY: spot.y }], objectPlate: objects.map(() => 0), rearranged: false, warnings: [], shifts: [kept.shift] };
   }
 
   // ---- re-arrange: shelf-pack dropped-to-z0 footprints into plates, reserving the tower strip.
@@ -707,6 +755,30 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
   const nPlates = Math.max(...placed.map((p) => p.plate)) + 1;
   const cols = Math.ceil(Math.sqrt(nPlates));
 
+  // per plate: centre that plate's packed group on the printable area, then find the tower a free spot around it
+  // (the group moves the least needed when the centred one leaves no room); else the old strip spot, with a warning.
+  const exTop = Math.max(0, ...spec.exclude.flat().map((p) => p[1]));
+  const crowded: number[] = [];
+  const shifts: number[] = [];
+  const plates = Array.from({ length: nPlates }, (_, k) => {
+    const mine = placed.filter((pl) => pl.plate === k);
+    const rects = mine.map((pl) => {
+      const b = bounds[pl.obj];
+      return { x0: pl.px, y0: pl.py, x1: pl.px + b.maxX - b.minX, y1: pl.py + b.maxY - b.minY };
+    });
+    const c = centreGroup(rects, spec);
+    if (c.spot) {
+      for (const pl of mine) { pl.px += c.dx; pl.py += c.dy; }
+      shifts.push(c.shift);
+    } else {
+      // no tower spot even off centre: keep the packed placement (right of the reserved tower strip, oversized
+      // objects pushed to the back-right), which leaves the tower the most room in practice
+      shifts.push(Math.round(Math.hypot(c.dx, c.dy) * 10) / 10);
+      crowded.push(k + 1);
+    }
+    return c.spot ? { towerX: c.spot.x, towerY: c.spot.y } : { towerX: 5, towerY: exTop > 0 ? exTop + spec.brim + 5 : 10 };
+  });
+
   const transforms = new Array<string>(objects.length);
   const objectPlate = new Array<number>(objects.length);
   for (const pl of placed) {
@@ -718,21 +790,6 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
     transforms[pl.obj] = xform(ox + pl.px - b.minX, oy + pl.py - b.minY, -b.minZ);
     objectPlate[pl.obj] = pl.plate;
   }
-  // per plate: the first free tower spot around that plate's objects (the reserved left strip always has one
-  // unless an oversized object spills into it); else the old strip spot, with a warning.
-  const exTop = Math.max(0, ...spec.exclude.flat().map((p) => p[1]));
-  const crowded: number[] = [];
-  const plates = Array.from({ length: nPlates }, (_, k) => {
-    const rects = placed
-      .filter((pl) => pl.plate === k)
-      .map((pl) => {
-        const b = bounds[pl.obj];
-        return { x0: pl.px, y0: pl.py, x1: pl.px + b.maxX - b.minX, y1: pl.py + b.maxY - b.minY };
-      });
-    const s = findTowerSpot(spec, rects);
-    if (!s) crowded.push(k + 1);
-    return s ? { towerX: s.x, towerY: s.y } : { towerX: 5, towerY: exTop > 0 ? exTop + spec.brim + 5 : 10 };
-  });
 
   // user-facing (shown as toasts); keep the word "re-arranged", the validator matches on it
   const why = overlap ? 'they overlap when seen from above' : !allOnBed ? 'some of them weren’t resting on the bed' : 'there wasn’t room left for the prime tower';
@@ -752,7 +809,7 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
         `so ${one ? 'it got' : 'each got'} a plate of ${one ? 'its' : 'their'} own. ${one ? 'It' : 'They'} may not slice; try scaling down in Bambu Studio.`,
     );
   }
-  return { transforms, plates, objectPlate, rearranged: true, warnings };
+  return { transforms, plates, objectPlate, rearranged: true, warnings, shifts };
 }
 
 /** Full Bambu Studio project: presets, filament colors, assembly laid out on one or more plates
@@ -760,7 +817,7 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
 export async function writeBambuProject(
   objects: ExportObject[],
   opts: BambuProjectOptions,
-): Promise<{ bytes: Uint8Array; warnings: string[] }> {
+): Promise<{ bytes: Uint8Array; warnings: string[]; plateShifts: number[] }> {
   requireObjects(objects);
   const tmpl = await loadTemplate(opts.printerId);
   const colors = opts.filamentColors.map((c) => c.toUpperCase());
@@ -837,5 +894,6 @@ export async function writeBambuProject(
   if (hasThumb) files['Metadata/plate_1.png'] = opts.thumbnailPng!;
 
   const bytes = zipSync(files, { level: 6 });
-  return { bytes, warnings };
+  // plateShifts: per plate, mm its objects sit off the printable-area centre to make room for the prime tower
+  return { bytes, warnings, plateShifts: layout.shifts };
 }
