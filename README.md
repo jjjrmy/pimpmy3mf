@@ -91,4 +91,17 @@ filaments, though, so it prints in one color there).
 
 ## License
 
-[MIT](LICENSE) © 2026 Jeremy Holstein
+pimpmy3mf is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+Copyright 2026 Jeremy Holstein.
+
+- **Free for noncommercial use:** personal, hobby, educational and other noncommercial use. No
+  commercial use of the software.
+- **Credit required:** if you redistribute this code or build on it, credit Jeremy Holstein and link
+  https://github.com/jjjrmy/pimpmy3mf. Keep the `Required Notice:` line from [LICENSE](LICENSE).
+- **Your files are yours:** the license covers the software, not what you make with it. The 3MF/STL
+  files you make with the site or the CLI are yours to use however you like, including selling the
+  prints.
+- **Commercial licensing:** open an issue or contact [@jjjrmy](https://github.com/jjjrmy) on GitHub.
+
+Third-party code, fonts and data keep their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Required Notice: Copyright 2026 Jeremy Holstein (https://github.com/jjjrmy/pimpmy3mf)
+# Licensed under the PolyForm Noncommercial License 1.0.0; see LICENSE at the repo root.
 """
 img2color - turn an image into one 3D shape per color, for multi-color printing in Bambu Studio.
 

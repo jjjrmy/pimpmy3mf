@@ -176,12 +176,18 @@ Test fixtures live in the git-ignored `scratch/` folder.
 
 ## Credits
 
-- Filament color data: [filamentcolors.xyz](https://filamentcolors.xyz) and
+- Filament color data: [filamentcolors.xyz](https://filamentcolors.xyz) (CC BY 4.0) and
   [SpoolmanDB](https://github.com/Donkie/SpoolmanDB) (MIT).
 - Geometry: [manifold-3d](https://github.com/elalish/manifold).
 - 3D preview: [three.js](https://threejs.org).
 - Zip/3MF packaging: [fflate](https://github.com/101arrowz/fflate).
 
+See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) for their licenses.
+
 ## License
 
-[MIT](../LICENSE) © 2026 Jeremy Holstein
+[PolyForm Noncommercial 1.0.0](../LICENSE). Copyright 2026 Jeremy Holstein.
+Free for noncommercial use; redistributions and derivatives must credit Jeremy Holstein and link
+https://github.com/jjjrmy/pimpmy3mf. Files you make with the app are yours, including selling the
+prints. For commercial licensing, open an issue or contact [@jjjrmy](https://github.com/jjjrmy) on
+GitHub. See the [root README](../README.md#license) for details.

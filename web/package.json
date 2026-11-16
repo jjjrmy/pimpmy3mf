@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Turn an image into a multi-color 3D print: one shape per color, or paint your own model, exported as Bambu Studio projects. Runs in the browser; served by a Cloudflare Worker.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "repository": "github:jjjrmy/pimpmy3mf",
   "type": "module",
   "scripts": {
