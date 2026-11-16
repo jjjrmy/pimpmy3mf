@@ -654,7 +654,8 @@ export default function App() {
           ),
       );
       if (!info.items.some((it) => it.itemId === movingItemId)) setMovingItemId(null);
-      setMate(null);
+      // restart the pick (not null) so the Assemble panel, and its Undo, stays open
+      setMate((m) => (m ? { ...MATE_START } : m));
     }
     if (changed) setGeomToken((t) => t + 1);
   };
