@@ -10,6 +10,8 @@ For each candidate printer this script:
   3. Classifies every project_settings key as constant / per-filament (length N) /
      N x N matrix / other N-dependent, and writes a compact template to
      src/core/bambu/templates/<printerId>.json that the TypeScript writer resizes at runtime.
+     The output is derived from Bambu Studio's bundled profiles and is licensed AGPL-3.0
+     (see src/core/bambu/templates/LICENSE), unlike the rest of pimpmy3mf.
 
 Run read-only against the app bundle:
 

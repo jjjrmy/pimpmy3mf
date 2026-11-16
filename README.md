@@ -103,5 +103,9 @@ Copyright 2026 Jeremy Holstein.
   prints.
 - **Commercial licensing:** open an issue or contact [@jjjrmy](https://github.com/jjjrmy) on GitHub.
 
+The rest of the project is PolyForm Noncommercial; the printer templates in
+[`web/src/core/bambu/templates/`](web/src/core/bambu/templates) are AGPL-3.0 (derived from Bambu
+Studio by Bambu Lab).
+
 Third-party code, fonts and data keep their own licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
