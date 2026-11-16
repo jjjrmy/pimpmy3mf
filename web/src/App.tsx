@@ -14,6 +14,7 @@ import { ColorsTab } from './ui/ColorsTab';
 import { ActionBar } from './ui/ActionBar';
 import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
+import { RunIndicator } from './ui/RunIndicator';
 import { Viewer3D, type FacePick } from './ui/Viewer3D';
 import { ViewportTools, type ViewportTool } from './ui/ViewportTools';
 import {
@@ -169,6 +170,8 @@ export default function App() {
   const [result, setResult] = useState<Result | null>(null);
   const [running, setRunning] = useState(false);
   const [stage, setStage] = useState<string | null>(null);
+  /** How far the current stage is (0..1), when the worker reports it. */
+  const [fraction, setFraction] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [overrides, setOverrides] = useState<(string | null)[]>([]);
@@ -605,20 +608,35 @@ export default function App() {
   };
 
   // ---- debounced run -------------------------------------------------------------------------
+  const runDeps = [image, model, mode, params, paletteMode, customPalette] as const;
+  const runDepsRef = useRef<readonly unknown[]>(runDeps);
+  runDepsRef.current = runDeps;
+  /** The inputs of a cancelled run: the effect skips them until something actually changes. */
+  const cancelledDepsRef = useRef<readonly unknown[] | null>(null);
+  const runTimerRef = useRef(0);
   useEffect(() => {
     if (!image) return;
     if (mode === 'paint' && !model) return;
+    const cancelled = cancelledDepsRef.current;
+    if (cancelled && cancelled.every((d, i) => d === runDeps[i])) return;
+    cancelledDepsRef.current = null;
     const client = clientRef.current!;
     const handle = window.setTimeout(() => {
+      runTimerRef.current = 0;
       const runParams: Params = { ...params, palette: paletteMode === 'custom' ? customPalette : null };
       setRunning(true);
       setError(null);
+      setFraction(null);
       client
-        .run(runParams, mode === 'paint', (s) => setStage(s))
+        .run(runParams, mode === 'paint', (s, f) => {
+          setStage(s);
+          setFraction(f ?? null);
+        })
         .then((res) => {
           setResult(res);
           setRunning(false);
           setStage(null);
+          setFraction(null);
           setOverrides((prev) => (prev.length === res.regions.length ? prev : new Array(res.regions.length).fill(null)));
           setHidden((prev) => new Set([...prev].filter((i) => i < res.regions.length)));
         })
@@ -626,12 +644,26 @@ export default function App() {
           if (err instanceof CancelledError || err.name === 'Cancelled') return;
           setRunning(false);
           setStage(null);
+          setFraction(null);
           setError(err.message);
           toast({ kind: 'error', title: 'Something went wrong', message: err.message });
         });
     }, 250);
+    runTimerRef.current = handle;
     return () => window.clearTimeout(handle);
-  }, [image, model, mode, params, paletteMode, customPalette]);
+  }, runDeps); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cancel: replace the worker (stops even a long WASM call), keep the last result, and don't re-run these inputs.
+  const onCancelRun = () => {
+    cancelledDepsRef.current = runDepsRef.current;
+    if (runTimerRef.current) window.clearTimeout(runTimerRef.current);
+    runTimerRef.current = 0;
+    clientRef.current?.cancel();
+    setRunning(false);
+    setStage(null);
+    setFraction(null);
+    toast({ kind: 'info', title: 'Update cancelled', message: 'The view shows the last result.' });
+  };
 
   // toast the pipeline's warnings once per new result (dedupe in the toaster guards re-renders)
   useEffect(() => {
@@ -732,8 +764,9 @@ export default function App() {
   const presetName = selectedPresetId ? (presets?.items.find((p) => p.id === selectedPresetId)?.name ?? null) : null;
   const headerName = model?.name ?? presetName ?? image?.name ?? null;
 
-  // Viewport loading overlay: busy = a non-pipeline load or a pipeline run. Reveal only after ~150 ms
-  // of continuous work so quick re-runs (thickness / color tweaks) don't flash it.
+  // Busy = a non-pipeline load or a pipeline run. Reveal the indicator only after ~150 ms of continuous
+  // work so quick re-runs (thickness / color tweaks) don't flash it. With nothing to show yet it's the full
+  // loading overlay; otherwise a corner pill over the previous result, which stays orbitable.
   const busy = !!busyLabel || running;
   useEffect(() => {
     if (!busy) {
@@ -744,6 +777,9 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [busy]);
   const loadingLabel = busyLabel ?? (running ? friendlyStage(stage) : 'Working…');
+  // `busy` too: showLoading clears in an effect, one render after the run settles
+  const showOverlay = showLoading && busy && !result;
+  const showPill = showLoading && busy && !!result;
 
   const emptyTitle = !image && !model ? 'Drop an image or a model' : model && !image ? 'Add an image to paint' : 'Generating…';
   const emptyBody =
@@ -875,7 +911,7 @@ export default function App() {
           </div>
 
           <div className="panel-right">
-            <div className="viewport" aria-busy={showLoading}>
+            <div className={`viewport${showPill ? ' is-updating' : ''}`} aria-busy={showLoading}>
               <div className="view-pane">
                 <Viewer3D
                   result={result}
@@ -887,6 +923,7 @@ export default function App() {
                   fitKey={fitKey}
                   active={true}
                   activeTool={mode === 'paint' && hasResult ? activeTool : null}
+                  toolsPaused={busy}
                   paintedFaces={params.paintedFaces}
                   modelToken={modelToken}
                   brush={brush}
@@ -911,10 +948,11 @@ export default function App() {
                   onBrush={setBrush}
                   textureErase={textureErase}
                   onTextureErase={setTextureErase}
+                  paused={busy && showLoading}
                 />
               )}
 
-              {mode === 'paint' && hasResult && (
+              {hasResult && (mode === 'paint' || !!result?.base) && (
                 <label className="viewport-prisms toggle toggle-inline">
                   <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
                   <span>Show modifier prisms</span>
@@ -934,10 +972,18 @@ export default function App() {
               )}
 
               <div className="viewport-status">
-                <StatusLine running={running} stage={stage} error={error} result={result} />
+                <StatusLine running={running} stage={stage ? friendlyStage(stage) : null} error={error} result={result} />
               </div>
 
-              {showLoading && <ViewportLoading label={loadingLabel} />}
+              {showPill && (
+                <RunIndicator
+                  label={loadingLabel}
+                  fraction={running && !busyLabel ? fraction : null}
+                  onCancel={running && !busyLabel ? onCancelRun : undefined}
+                />
+              )}
+
+              {showOverlay && <ViewportLoading label={loadingLabel} />}
             </div>
 
             <ActionBar

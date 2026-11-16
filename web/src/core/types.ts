@@ -64,7 +64,17 @@ export interface FaceTexture {
   patternRef: { id: string; name: string } | null;
   /** Region area in mm² (as loaded). */
   area: number;
+  /** How the pattern is laid onto the region; missing = 'auto' (textures saved before this field existed). */
+  mapping?: TextureMapping;
 }
+
+/**
+ * Texture parameterization. auto: planar for flat regions, else cylindrical when it doesn't stretch, else unwrap.
+ * planar: flat projection along the mean normal. cylindrical: rows along the region's axis, u = arc length around
+ * the real cross-section. unwrap: conformal flattening of the surface (any curved shape; doubly curved ones keep the
+ * cells square but their size varies).
+ */
+export type TextureMapping = 'auto' | 'planar' | 'cylindrical' | 'unwrap';
 
 /** Cylindrical projection geometry. Basis per axis: CYL_BASIS in src/core/cylinder.ts. */
 export interface CylinderFrame {

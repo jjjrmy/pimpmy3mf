@@ -15,6 +15,7 @@ export type IconName =
   | 'check'
   | 'info'
   | 'busy'
+  | 'spinner'
   | 'chevron-left'
   | 'chevron-right'
   | 'chevron-down'
@@ -90,6 +91,13 @@ const PATHS: Record<IconName, ReactElement> = {
       <path d="M6.5 3h11M6.5 21h11" />
       <path d="M8 3v2.4a4 4 0 0 0 1.4 3L12 12l2.6-3.6a4 4 0 0 0 1.4-3V3" />
       <path d="M8 21v-2.4a4 4 0 0 1 1.4-3L12 12l2.6 3.6a4 4 0 0 1 1.4 3V21" />
+    </>
+  ),
+  // a bright arc over a faint ring; CSS (.icon-spin) turns it
+  spinner: (
+    <>
+      <circle cx="12" cy="12" r="8.5" opacity="0.28" />
+      <path d="M12 3.5a8.5 8.5 0 0 1 8.5 8.5" />
     </>
   ),
   'chevron-left': <path d="M15 5 8 12l7 7" />,

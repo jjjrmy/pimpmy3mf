@@ -24,6 +24,8 @@ interface ViewportToolsProps {
   /** Texture-face tool in eraser mode (a stroke removes textures instead of adding one). */
   textureErase: boolean;
   onTextureErase: (erase: boolean) => void;
+  /** A pipeline run is in flight: picking is off in Viewer3D, so say so. */
+  paused?: boolean;
 }
 
 /** Toggle a tool: clicking the active one exits (null). */
@@ -39,6 +41,7 @@ export function ViewportTools({
   onBrush,
   textureErase,
   onTextureErase,
+  paused = false,
 }: ViewportToolsProps) {
   const toggle = (tool: ViewportTool) => onToolChange(activeTool === tool ? null : tool);
   return (
@@ -117,6 +120,11 @@ export function ViewportTools({
           </div>
           <p className="hint tex-hint">{textureErase ? 'Click or drag over a textured face to remove it.' : 'Pattern & settings: Texture tab.'}</p>
         </div>
+      )}
+      {paused && activeTool && (
+        <p className="vtool-paused" role="status">
+          Updating… tools are paused
+        </p>
       )}
       {hasOrientation && (
         <div className="vtool-sub">

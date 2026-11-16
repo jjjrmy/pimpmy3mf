@@ -13,6 +13,7 @@ import {
   keyOfTexture,
   libIdOf,
   libKey,
+  mappingLabel,
   resolvePatternKey,
   textureLabel,
   type PatternChoice,
@@ -337,6 +338,7 @@ export function TextureTab(props: TextureTabProps) {
                             )}
                             <span className="tex-meta">
                               {t.mode === 'raised' ? 'Raised' : 'Recessed'} {t.height} mm · {t.pitch} mm pitch · {t.area.toFixed(1)} mm²
+                              {t.mapping && t.mapping !== 'auto' ? ` · ${mappingLabel(t.mapping)}` : ''}
                             </span>
                           </span>
                           <button

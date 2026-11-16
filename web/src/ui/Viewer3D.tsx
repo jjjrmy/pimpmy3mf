@@ -38,6 +38,8 @@ interface Viewer3DProps {
   active: boolean;
   /** Paint-mode tool in use, or null. Enables hover-highlight + click picking + crosshair cursor. */
   activeTool: ViewportTool | null;
+  /** A pipeline run is in flight: no hover highlight and no new stroke / pick on the stale geometry. */
+  toolsPaused?: boolean;
   /** Painted faces (as-loaded triangle indices) to draw as solid color overlays. */
   paintedFaces: PaintedFace[];
   /** Bumps on model load/clear; invalidates the per-part adjacency cache. */
@@ -131,13 +133,19 @@ function subGeometry(m: CoreMesh, triangles: number[], lift?: Float32Array | nul
   return g;
 }
 
+/** See-through stand-in for a printed part while its modifiers are shown. Shared, never disposed. */
+const GLASS = new THREE.MeshStandardMaterial({
+  color: 0xdfe8ee, transparent: true, opacity: 0.16, depthWrite: false, roughness: 0.4, metalness: 0,
+});
+
 function disposeGroup(group: THREE.Group) {
   group.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if (mesh.geometry) mesh.geometry.dispose();
     const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
     if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-    else mat?.dispose();
+    else if (mat !== GLASS) mat?.dispose();
+    (mesh.userData?.ownMaterial as THREE.Material | undefined)?.dispose(); // swapped out for the glass
   });
   group.clear();
 }
@@ -249,6 +257,7 @@ export function Viewer3D({
   fitKey,
   active,
   activeTool,
+  toolsPaused = false,
   paintedFaces,
   modelToken,
   brush,
@@ -267,6 +276,10 @@ export function Viewer3D({
   resultRef.current = result;
   const toolRef = useRef(activeTool);
   toolRef.current = activeTool;
+  const pausedRef = useRef(toolsPaused);
+  pausedRef.current = toolsPaused;
+  /** Set by the active-tool effect: drops the hover highlight unless a stroke is in progress. */
+  const pauseToolRef = useRef<(() => void) | null>(null);
   const modelTokenRef = useRef(modelToken);
   modelTokenRef.current = modelToken;
   const onLayRef = useRef(onLayPick);
@@ -552,6 +565,7 @@ export function Viewer3D({
           }),
         );
         mesh.visible = showModifiers && !hiddenParts.has(key);
+        mesh.renderOrder = 2;
         b.skinMeshes.push({ mesh, faceId: skin.faceId, key, color: skin.color });
         b.objectGroup.add(mesh);
       }
@@ -574,6 +588,7 @@ export function Viewer3D({
             }),
           );
           prism.visible = showModifiers && !hidden.has(r.index);
+          prism.renderOrder = 2; // after the ghosted parts
           b.objectGroup.add(prism);
           return prism;
         });
@@ -647,13 +662,42 @@ export function Viewer3D({
   useEffect(() => {
     const b = sceneRef.current;
     if (!b || !result) return;
+    // With paint depth the modifiers are shells that sit exactly on (and inside) the model's surface, so an
+    // opaque model hides them completely. While they're shown, the printed parts turn into a see-through ghost.
+    const ghost = (m: THREE.Mesh, on: boolean, opacity = 0.18) => {
+      const mat = m.material as THREE.MeshStandardMaterial;
+      if (mat.transparent === on && (!on || mat.opacity === opacity)) return;
+      mat.transparent = on;
+      mat.opacity = on ? opacity : 1;
+      mat.depthWrite = !on;
+      mat.needsUpdate = true;
+    };
+    // paint-mode parts swap to a plain glass material (the camo texture would muddle the modifier colors)
+    const glass = (m: THREE.Mesh, on: boolean) => {
+      const own = (m.userData.ownMaterial ?? m.material) as THREE.Material;
+      if (on) {
+        m.userData.ownMaterial = own;
+        m.material = GLASS;
+      } else if (m.userData.ownMaterial) {
+        m.material = own;
+        delete m.userData.ownMaterial;
+      }
+    };
+    // thin depth shells need more opacity than the full prisms to read at all
+    const modOpacity = result.depth != null ? 0.62 : 0.32;
     if (result.mode === 'image') {
       for (const [idx, mesh] of b.regionMeshes) {
         const mat = mesh.material as THREE.MeshStandardMaterial;
         mat.color.set(hexes[idx] ?? result.regions[idx]?.hex ?? '#cccccc');
         mesh.visible = !hidden.has(idx);
+        // tile with paint depth: color 1 is the full slab and the other colors are caps over its top
+        ghost(mesh, showModifiers && !!result.base && idx === 0, 0.25);
+        mesh.renderOrder = idx === 0 ? 0 : 1;
       }
     } else {
+      for (const mesh of b.partMeshes.values()) glass(mesh, showModifiers);
+      for (const mesh of b.faceMeshes.values()) ghost(mesh, showModifiers);
+      for (const m of b.innerMeshes) ghost(m.mesh, showModifiers);
       if (b.textureCanvas && b.texture) {
         drawTexture(b.textureCanvas, result, hexes, hidden);
         b.texture.needsUpdate = true;
@@ -662,6 +706,7 @@ export function Viewer3D({
         for (const mesh of meshes) {
           const mat = mesh.material as THREE.MeshStandardMaterial;
           mat.color.set(hexes[idx] ?? result.regions[idx]?.hex ?? '#cccccc');
+          mat.opacity = modOpacity;
           mesh.visible = showModifiers && !hidden.has(idx);
         }
       }
@@ -675,6 +720,7 @@ export function Viewer3D({
       }
       for (const s of b.skinMeshes) {
         (s.mesh.material as THREE.MeshStandardMaterial).color.set(clampedColor(s.color, hexes, result));
+        (s.mesh.material as THREE.MeshStandardMaterial).opacity = modOpacity;
         s.mesh.visible = showModifiers && !hiddenParts.has(s.key);
       }
       for (const m of b.innerMeshes) {
@@ -707,7 +753,7 @@ export function Viewer3D({
       clearHighlight();
       return;
     }
-    canvas.style.cursor = 'crosshair';
+    canvas.style.cursor = pausedRef.current ? 'progress' : 'crosshair';
 
     const raycaster = new THREE.Raycaster();
     const down = { x: 0, y: 0, active: false };
@@ -852,12 +898,18 @@ export function Viewer3D({
       b.strokeMeshes = [];
     };
 
+    pauseToolRef.current = () => {
+      if (!stroke) clearHighlight();
+    };
+
     const onPointerMove = (e: PointerEvent) => {
+      // a stroke begun before the run may finish; otherwise no hover on geometry that's about to change
+      if (pausedRef.current && !stroke) return;
       pending = { x: e.clientX, y: e.clientY };
       if (hoverRaf) return;
       hoverRaf = requestAnimationFrame(() => {
         hoverRaf = 0;
-        if (!pending) return;
+        if (!pending || (pausedRef.current && !stroke)) return;
         const pick = pickAt(pending.x, pending.y);
         if (stroke) addStrokeRegion(pick); // painting: accumulate, no hover highlight
         else showHighlight(pick);
@@ -868,6 +920,7 @@ export function Viewer3D({
       down.x = e.clientX;
       down.y = e.clientY;
       down.active = true;
+      if (pausedRef.current) return; // orbit only while a run is in flight
       const tool = toolRef.current;
       if (tool !== 'paint' && tool !== 'texture') return;
       const pick = pickAt(e.clientX, e.clientY);
@@ -900,7 +953,7 @@ export function Viewer3D({
         return;
       }
       // lay-on-face is click-only: a small move = a click (a drag orbited)
-      if (toolRef.current === 'lay' && wasActive && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
+      if (toolRef.current === 'lay' && wasActive && !pausedRef.current && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
         const pick = pickAt(e.clientX, e.clientY);
         if (pick) onLayRef.current(pick);
       }
@@ -915,6 +968,7 @@ export function Viewer3D({
     canvas.addEventListener('pointerleave', onPointerLeave);
 
     return () => {
+      pauseToolRef.current = null;
       canvas.style.cursor = '';
       if (hoverRaf) cancelAnimationFrame(hoverRaf);
       canvas.removeEventListener('pointermove', onPointerMove);
@@ -927,6 +981,14 @@ export function Viewer3D({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTool]);
+
+  // pausing drops the hover highlight and swaps the crosshair for a busy cursor; resuming restores it
+  useEffect(() => {
+    const b = sceneRef.current;
+    if (!b || !activeTool) return;
+    b.renderer.domElement.style.cursor = toolsPaused ? 'progress' : 'crosshair';
+    if (toolsPaused) pauseToolRef.current?.();
+  }, [toolsPaused, activeTool]);
 
   return <div ref={mountRef} className="viewer3d" />;
 }

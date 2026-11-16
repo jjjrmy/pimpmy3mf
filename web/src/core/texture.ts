@@ -1,10 +1,12 @@
 // Face textures: real surface relief (knurl, stipple, ridges, honeycomb, custom height map) displaced into a part's
 // mesh. Runs in AS-LOADED space, before re-orientation. Per texture: weld, refine the selected region watertight
 // (edges split in both neighbours, so no T-junctions), then move vertices along the region's smoothed normal by a
-// periodic height field in a local (u, v) parameterization (planar, or cylindrical for round grips). Topology never
-// changes after refinement and the region boundary never moves, so the part stays a closed manifold.
+// periodic height field in a local (u, v) parameterization in mm along the surface: planar for flat regions, else an
+// arc-length cylinder or a conformal unwrap of the coarse patch (unwrap.ts), so the pitch holds all the way around.
+// Topology never changes after refinement and the region boundary never moves, so the part stays a closed manifold.
 import type { ManifoldToplevel } from 'manifold-3d';
-import type { FaceTexture, Mesh, Model, TexturePattern } from './types';
+import type { FaceTexture, Mesh, Model, TextureMapping, TexturePattern } from './types';
+import { cross, dot, norm, solvePatch, type PatchUV, type V3 } from './unwrap';
 
 /** Projected triangle budget for the whole model (all parts) after texturing. */
 export const MAX_TEXTURE_TRIS = 600_000;
@@ -16,7 +18,16 @@ const MIN_EDGE = 0.1;
 const SQRT3_2 = Math.sqrt(3) / 2;
 
 /** Wall time of the last applyTextures call, per texture, for scripts. */
-export const textureStats = { ms: 0, perTexture: [] as { id: string; ms: number; triangles: number; edge: number; projection: string }[] };
+export const textureStats = {
+  ms: 0,
+  perTexture: [] as {
+    id: string; ms: number; triangles: number; edge: number;
+    /** The parameterization used ('planar' | 'cylindrical' | 'unwrap'); `mapping` = what was asked for. */
+    projection: string; mapping: TextureMapping;
+    /** Area-weighted 90th percentile of the map's stretch max(σ1, 1/σ2) (1 = none; planar maps: not measured, 0). */
+    distortion: number;
+  }[],
+};
 
 // ------------------------------------------------------------------------------------ height fields
 
@@ -116,65 +127,14 @@ export function meanHeight(tex: Pick<FaceTexture, 'pattern' | 'image'>, n = 200)
   return s / (n * n);
 }
 
-// ------------------------------------------------------------------------------------ small linear algebra
-
-type V3 = [number, number, number];
-const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const norm = (a: V3): V3 => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
-
-/** Eigen-decomposition of a symmetric 3x3 (row-major) by Jacobi rotations: eigenvalues + column eigenvectors. */
-function eigSym3(m: number[]): { values: number[]; vectors: V3[] } {
-  const a = m.slice();
-  const v = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-  for (let sweep = 0; sweep < 50; sweep++) {
-    const off = a[1] * a[1] + a[2] * a[2] + a[5] * a[5];
-    if (off < 1e-24) break;
-    for (const [p, q] of [[0, 1], [0, 2], [1, 2]] as const) {
-      const apq = a[p * 3 + q];
-      if (Math.abs(apq) < 1e-30) continue;
-      const theta = (a[q * 3 + q] - a[p * 3 + p]) / (2 * apq);
-      const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
-      const c = 1 / Math.sqrt(t * t + 1), s = t * c;
-      for (let k = 0; k < 3; k++) { // A = Jᵀ A J
-        const akp = a[k * 3 + p], akq = a[k * 3 + q];
-        a[k * 3 + p] = c * akp - s * akq; a[k * 3 + q] = s * akp + c * akq;
-      }
-      for (let k = 0; k < 3; k++) {
-        const apk = a[p * 3 + k], aqk = a[q * 3 + k];
-        a[p * 3 + k] = c * apk - s * aqk; a[q * 3 + k] = s * apk + c * aqk;
-      }
-      for (let k = 0; k < 3; k++) {
-        const vkp = v[k * 3 + p], vkq = v[k * 3 + q];
-        v[k * 3 + p] = c * vkp - s * vkq; v[k * 3 + q] = s * vkp + c * vkq;
-      }
-    }
-  }
-  return { values: [a[0], a[4], a[8]], vectors: [0, 1, 2].map((c) => [v[c], v[3 + c], v[6 + c]] as V3) };
-}
-
-function solve3(A: number[], b: number[]): number[] | null {
-  const m = [A.slice(0, 3).concat(b[0]), A.slice(3, 6).concat(b[1]), A.slice(6, 9).concat(b[2])];
-  for (let c = 0; c < 3; c++) {
-    let p = c;
-    for (let r = c + 1; r < 3; r++) if (Math.abs(m[r][c]) > Math.abs(m[p][c])) p = r;
-    if (Math.abs(m[p][c]) < 1e-18) return null;
-    [m[c], m[p]] = [m[p], m[c]];
-    for (let r = 0; r < 3; r++) {
-      if (r === c) continue;
-      const f = m[r][c] / m[c][c];
-      for (let k = c; k < 4; k++) m[r][k] -= f * m[c][k];
-    }
-  }
-  return [m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]];
-}
-
 // ------------------------------------------------------------------------------------ working mesh
 
 interface Work {
   pos: number[]; // xyz, float64
   tris: number[];
   origin: number[]; // per triangle: as-loaded triangle index
+  /** While refining for one texture: per triangle, the pre-refinement triangle it came from (uv lookup). */
+  parent?: number[];
 }
 
 /** Weld by quantized position (1e-4 mm, like buildAdjacency); triangle order is kept. */
@@ -261,12 +221,14 @@ function refine(w: Work, sel: number[], L: number, triBudget: number): boolean {
       mid.set(key, id);
       return id;
     };
-    const tris: number[] = [], origin: number[] = [], nsel: number[] = [];
-    const emit = (a: number, b: number, c: number, o: number, s: number) => { tris.push(a, b, c); origin.push(o); nsel.push(s); };
+    const tris: number[] = [], origin: number[] = [], nsel: number[] = [], parent: number[] = [];
+    let par = 0;
+    const emit = (a: number, b: number, c: number, o: number, s: number) => { tris.push(a, b, c); origin.push(o); nsel.push(s); parent.push(par); };
     for (let t = 0; t < nt; t++) {
       const vs = [T[t * 3], T[t * 3 + 1], T[t * 3 + 2]];
       const ms = [getMid(vs[0], vs[1]), getMid(vs[1], vs[2]), getMid(vs[2], vs[0])];
       const o = w.origin[t], s = sel[t];
+      par = w.parent ? w.parent[t] : 0;
       const cnt = (ms[0] >= 0 ? 1 : 0) + (ms[1] >= 0 ? 1 : 0) + (ms[2] >= 0 ? 1 : 0);
       if (cnt === 0) { emit(vs[0], vs[1], vs[2], o, s); continue; }
       if (s) {
@@ -297,6 +259,7 @@ function refine(w: Work, sel: number[], L: number, triBudget: number): boolean {
       else { emit(a, m1, c, o, s); emit(m1, m2, c, o, s); }
     }
     w.tris = tris; w.origin = origin;
+    if (w.parent) w.parent = parent;
     sel.length = 0;
     for (const x of nsel) sel.push(x);
     if (tris.length / 3 > triBudget) return false;
@@ -379,11 +342,14 @@ function delaunayFlips(w: Work, sel: number[]): void {
 // ------------------------------------------------------------------------------------ parameterization
 
 interface UVMap {
-  kind: 'planar' | 'cylindrical';
-  /** (u, v) in mm of a point. */
-  uv: (x: number, y: number, z: number) => [number, number];
-  /** Full-wrap cylinder: circumference (u period), else 0. */
+  kind: 'planar' | 'cylindrical' | 'unwrap';
+  /** Planar: (u, v) in mm of a point. */
+  uv?: (x: number, y: number, z: number) => [number, number];
+  /** Cylindrical / unwrap: uv + amplitude per corner of the (pre-refinement) working triangles. */
+  patch?: PatchUV;
+  /** Full wrap: the u period (around the part), else 0. */
   circ: number;
+  distortion: number;
 }
 
 function planarMap(n: V3, cx: number, cy: number, cz: number): UVMap {
@@ -392,7 +358,7 @@ function planarMap(n: V3, cx: number, cy: number, cz: number): UVMap {
   const e1 = norm([ref[0] - n[0] * dot(ref, n), ref[1] - n[1] * dot(ref, n), ref[2] - n[2] * dot(ref, n)]);
   const e2 = cross(n, e1);
   return {
-    kind: 'planar', circ: 0,
+    kind: 'planar', circ: 0, distortion: 0,
     uv: (x, y, z) => {
       const dx = x - cx, dy = y - cy, dz = z - cz;
       return [dx * e1[0] + dy * e1[1] + dz * e1[2], dx * e2[0] + dy * e2[1] + dz * e2[2]];
@@ -400,13 +366,17 @@ function planarMap(n: V3, cx: number, cy: number, cz: number): UVMap {
   };
 }
 
-/** Region frame from the selected triangles: planar if the normals stay within 15° of the mean, else cylindrical. */
-function regionMap(w: Work, sel: number[], warn: (s: string) => void, name: string): UVMap | null {
+/** Auto keeps the axis-true cylinder when it is (nearly) stretch-free, else whichever of the two stretches less. */
+const CYL_OK = 1.03;
+
+/**
+ * Region frame from the selected triangles. Auto: planar if the normals stay within 15° of the mean, else the
+ * arc-length cylinder when it barely stretches, else the conformal unwrap. Explicit mappings are honoured.
+ */
+function regionMap(w: Work, sel: number[], mapping: TextureMapping, warn: (s: string) => void, name: string): UVMap | null {
   const { pos, tris } = w;
   let ax = 0, ay = 0, az = 0, A = 0, cx = 0, cy = 0, cz = 0;
-  const cov = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-  const normals: [V3, number][] = [];
-  const verts = new Set<number>();
+  const normals: V3[] = [];
   for (let t = 0; t < sel.length; t++) {
     if (!sel[t]) continue;
     const a = tris[t * 3], b = tris[t * 3 + 1], c = tris[t * 3 + 2];
@@ -415,81 +385,43 @@ function regionMap(w: Work, sel: number[], warn: (s: string) => void, name: stri
     const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     const l = Math.hypot(nx, ny, nz);
     if (l < 1e-12) continue;
-    const ar = l / 2, n: V3 = [nx / l, ny / l, nz / l];
-    normals.push([n, ar]);
-    ax += n[0] * ar; ay += n[1] * ar; az += n[2] * ar; A += ar;
+    const ar = l / 2;
+    normals.push([nx / l, ny / l, nz / l]);
+    ax += (nx / l) * ar; ay += (ny / l) * ar; az += (nz / l) * ar; A += ar;
     cx += ar * (pos[a * 3] + pos[b * 3] + pos[c * 3]) / 3;
     cy += ar * (pos[a * 3 + 1] + pos[b * 3 + 1] + pos[c * 3 + 1]) / 3;
     cz += ar * (pos[a * 3 + 2] + pos[b * 3 + 2] + pos[c * 3 + 2]) / 3;
-    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) cov[i * 3 + j] += ar * n[i] * n[j];
-    verts.add(a); verts.add(b); verts.add(c);
   }
   if (A <= 0) return null;
   cx /= A; cy /= A; cz /= A;
   const meanLen = Math.hypot(ax, ay, az);
   const mean: V3 = meanLen > 1e-9 ? [ax / meanLen, ay / meanLen, az / meanLen] : [0, 0, 1];
   const cos15 = Math.cos((15 * Math.PI) / 180);
-  if (meanLen > 1e-9 && normals.every(([n]) => dot(n, mean) >= cos15)) return planarMap(mean, cx, cy, cz);
+  const flat = meanLen > 1e-9 && normals.every((n) => dot(n, mean) >= cos15);
+  if (mapping === 'planar' || (mapping === 'auto' && flat)) return planarMap(mean, cx, cy, cz);
 
-  // cylindrical: axis = direction the normals don't vary along (smallest eigenvalue of Σ a n nᵀ)
-  const { values, vectors } = eigSym3(cov);
-  let mi = 0;
-  for (let i = 1; i < 3; i++) if (values[i] < values[mi]) mi = i;
-  let axis = norm(vectors[mi]);
-  const big = Math.abs(axis[0]) >= Math.abs(axis[1]) && Math.abs(axis[0]) >= Math.abs(axis[2]) ? 0 : Math.abs(axis[1]) >= Math.abs(axis[2]) ? 1 : 2;
-  if (axis[big] < 0) axis = [-axis[0], -axis[1], -axis[2]];
-  let ref: V3 = [1, 0, 0];
-  if (Math.abs(axis[0]) > 0.9) ref = [0, 1, 0];
-  const b1 = norm([ref[0] - axis[0] * dot(ref, axis), ref[1] - axis[1] * dot(ref, axis), ref[2] - axis[2] * dot(ref, axis)]);
-  const b2 = cross(axis, b1);
-
-  // Kasa circle fit on the vertices projected onto the plane ⊥ axis (centred for conditioning)
-  const pts: [number, number, number][] = [];
-  let mx = 0, my = 0;
-  for (const i of verts) {
-    const p: V3 = [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]];
-    const x = dot(p, b1), y = dot(p, b2);
-    pts.push([x, y, dot(p, axis)]); mx += x; my += y;
-  }
-  mx /= pts.length; my /= pts.length;
-  let fit: { x0: number; y0: number; R: number; rms: number } | null = null;
-  if (pts.length >= 5) {
-    let sxx = 0, sxy = 0, syy = 0, sx = 0, sy = 0, sxz = 0, syz = 0, sz = 0;
-    for (const [px, py] of pts) {
-      const x = px - mx, y = py - my, z = x * x + y * y;
-      sxx += x * x; sxy += x * y; syy += y * y; sx += x; sy += y; sxz += x * z; syz += y * z; sz += z;
+  const solve = (mode: 'cylindrical' | 'unwrap'): UVMap | null => {
+    const p = solvePatch(pos, tris, sel, mode);
+    if (p?.failed.length) failed.push(...p.failed);
+    return p && p.coverage > 0 ? { kind: mode, patch: p, circ: p.circ, distortion: p.distortion } : null;
+  };
+  const failed: string[] = [];
+  let map: UVMap | null;
+  if (mapping === 'auto') {
+    const cyl = solve('cylindrical');
+    if (cyl && cyl.distortion <= CYL_OK) map = cyl;
+    else {
+      const unw = solve('unwrap');
+      map = cyl && unw ? (cyl.distortion <= unw.distortion + 0.01 ? cyl : unw) : (unw ?? cyl);
     }
-    const s = solve3([sxx, sxy, sx, sxy, syy, sy, sx, sy, pts.length], [-sxz, -syz, -sz]);
-    if (s) {
-      const x0 = -s[0] / 2, y0 = -s[1] / 2, R2 = x0 * x0 + y0 * y0 - s[2];
-      if (R2 > 0) {
-        const R = Math.sqrt(R2);
-        let e = 0;
-        for (const [px, py] of pts) { const r = Math.hypot(px - mx - x0, py - my - y0); e += (r - R) * (r - R); }
-        fit = { x0: x0 + mx, y0: y0 + my, R, rms: Math.sqrt(e / pts.length) };
-      }
-    }
-  }
-  if (!fit || !(fit.R > 0) || fit.rms > 0.1 * fit.R) {
-    warn(`Texture "${name}": the region is curved but not cylindrical; projected flat (may stretch).`);
+  } else map = solve(mapping);
+  const why = [...new Set(failed)].join('; ');
+  if (!map) {
+    warn(`Texture "${name}": the region could not be unwrapped (${why || 'degenerate'}); projected flat (may stretch).`);
     return planarMap(mean, cx, cy, cz);
   }
-  const { x0, y0, R } = fit;
-  // seam opposite the region's mean direction, so a partial wrap is contiguous in u
-  let sc = 0, ss = 0;
-  for (const [px, py] of pts) { const a = Math.atan2(py - y0, px - x0); sc += Math.cos(a); ss += Math.sin(a); }
-  const phi0 = Math.atan2(ss, sc);
-  const wrapAngle = (a: number) => { let d = a - phi0; while (d > Math.PI) d -= 2 * Math.PI; while (d <= -Math.PI) d += 2 * Math.PI; return d; };
-  let lo = Infinity, hi = -Infinity;
-  for (const [px, py] of pts) { const d = wrapAngle(Math.atan2(py - y0, px - x0)); if (d < lo) lo = d; if (d > hi) hi = d; }
-  const full = hi - lo >= (300 * Math.PI) / 180;
-  return {
-    kind: 'cylindrical', circ: full ? 2 * Math.PI * R : 0,
-    uv: (x, y, z) => {
-      const p: V3 = [x, y, z];
-      return [R * wrapAngle(Math.atan2(dot(p, b2) - y0, dot(p, b1) - x0)), dot(p, axis)];
-    },
-  };
+  if (map.patch!.failed.length) warn(`Texture "${name}": part of the region was left plain (${[...new Set(map.patch!.failed)].join('; ')}).`);
+  return map;
 }
 
 /**
@@ -551,8 +483,12 @@ class Heap {
   }
 }
 
-/** Displaces the selected region in place. */
-function displace(w: Work, sel: number[], tex: FaceTexture, map: UVMap, field: HeightField): void {
+/**
+ * Displaces the selected region in place. Patch maps: each refined vertex takes the uv of its pre-refinement
+ * triangle (`coarse` = the triangle list before refine, `w.parent` the lineage) by barycentric interpolation;
+ * refinement keeps vertices on those flat triangles. Across a wrap's cut either branch is fine (the jump is a period).
+ */
+function displace(w: Work, sel: number[], tex: FaceTexture, map: UVMap, field: HeightField, coarse: number[]): void {
   const { pos, tris } = w;
   const nv = pos.length / 3, nt = tris.length / 3;
   const nrm = new Float64Array(nv * 3);
@@ -595,13 +531,46 @@ function displace(w: Work, sel: number[], tex: FaceTexture, map: UVMap, field: H
     }
   }
 
-  // pattern coordinates
+  // pattern coordinates (+ amplitude factor for patch maps)
   let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
   const uvs = new Float64Array(nv * 2);
+  const ampv = new Float64Array(nv).fill(1);
+  if (map.patch) {
+    const pt = map.patch, par = w.parent!;
+    const src = new Int32Array(nv).fill(-1); // a coarse triangle with uv containing the vertex
+    for (let t = 0; t < nt; t++) {
+      if (!sel[t]) continue;
+      const p = par[t];
+      if (!pt.has[p]) continue;
+      for (let e = 0; e < 3; e++) { const i = tris[t * 3 + e]; if (src[i] < 0) src[i] = p; }
+    }
+    for (let i = 0; i < nv; i++) {
+      if (!inSel[i]) continue;
+      const p = src[i];
+      if (p < 0) { ampv[i] = 0; continue; }
+      const a = coarse[p * 3], b = coarse[p * 3 + 1], c = coarse[p * 3 + 2];
+      const e1x = pos[b * 3] - pos[a * 3], e1y = pos[b * 3 + 1] - pos[a * 3 + 1], e1z = pos[b * 3 + 2] - pos[a * 3 + 2];
+      const e2x = pos[c * 3] - pos[a * 3], e2y = pos[c * 3 + 1] - pos[a * 3 + 1], e2z = pos[c * 3 + 2] - pos[a * 3 + 2];
+      const qx = pos[i * 3] - pos[a * 3], qy = pos[i * 3 + 1] - pos[a * 3 + 1], qz = pos[i * 3 + 2] - pos[a * 3 + 2];
+      const d11 = e1x * e1x + e1y * e1y + e1z * e1z, d12 = e1x * e2x + e1y * e2y + e1z * e2z, d22 = e2x * e2x + e2y * e2y + e2z * e2z;
+      const q1 = qx * e1x + qy * e1y + qz * e1z, q2 = qx * e2x + qy * e2y + qz * e2z;
+      const det = d11 * d22 - d12 * d12 || 1e-30;
+      const l1 = (d22 * q1 - d12 * q2) / det, l2 = (d11 * q2 - d12 * q1) / det, l0 = 1 - l1 - l2;
+      const U = pt.uv, o = p * 6;
+      uvs[i * 2] = l0 * U[o] + l1 * U[o + 2] + l2 * U[o + 4];
+      uvs[i * 2 + 1] = l0 * U[o + 1] + l1 * U[o + 3] + l2 * U[o + 5];
+      ampv[i] = Math.max(0, Math.min(1, l0 * pt.amp[p * 3] + l1 * pt.amp[p * 3 + 1] + l2 * pt.amp[p * 3 + 2]));
+    }
+  } else {
+    for (let i = 0; i < nv; i++) {
+      if (!inSel[i]) continue;
+      const [u, v] = map.uv!(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+      uvs[i * 2] = u; uvs[i * 2 + 1] = v;
+    }
+  }
   for (let i = 0; i < nv; i++) {
-    if (!inSel[i]) continue;
-    const [u, v] = map.uv(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
-    uvs[i * 2] = u; uvs[i * 2 + 1] = v;
+    if (!inSel[i] || ampv[i] <= 0) continue;
+    const u = uvs[i * 2], v = uvs[i * 2 + 1];
     if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v;
   }
   const theta0 = field.rotates ? (tex.rotation * Math.PI) / 180 : 0;
@@ -619,7 +588,7 @@ function displace(w: Work, sel: number[], tex: FaceTexture, map: UVMap, field: H
     if (l < 1e-12) continue;
     const du = uvs[i * 2] - cu, dv = uvs[i * 2 + 1] - cv;
     const h = field.h((ct * du + st * dv) / pitch, (-st * du + ct * dv) / pitch);
-    const s = (amp * h * wgt) / l;
+    const s = (amp * h * wgt * ampv[i]) / l;
     pos[i * 3] += nrm[i * 3] * s; pos[i * 3 + 1] += nrm[i * 3 + 1] * s; pos[i * 3 + 2] += nrm[i * 3 + 2] * s;
   }
 }
@@ -634,7 +603,7 @@ export function textureKey(textures: FaceTexture[]): string {
     let ih = 0;
     if (t.image) for (let i = 0; i < t.image.data.length; i++) ih = (Math.imul(ih, 31) + t.image.data[i]) | 0;
     const img = t.image ? `${t.image.width}x${t.image.height}#${ih}` : '';
-    return `${t.id}:${t.objectIndex}:${t.partIndex}:${t.triangles.length}#${h}:${t.pattern}:${t.mode}:${t.height}:${t.pitch}:${t.rotation}:${img}`;
+    return `${t.id}:${t.objectIndex}:${t.partIndex}:${t.triangles.length}#${h}:${t.pattern}:${t.mode}:${t.height}:${t.pitch}:${t.rotation}:${t.mapping ?? 'auto'}:${img}`;
   }).join(';');
 }
 
@@ -700,7 +669,8 @@ export async function applyTextures(
     for (const i of tex.triangles) region[i] = 1;
     const sel: number[] = w.origin.map((o) => region[o]);
     const field = heightField(tex);
-    const map = regionMap(w, sel, (s) => warnings.push(s), name);
+    const mapping: TextureMapping = tex.mapping ?? 'auto';
+    const map = regionMap(w, sel, mapping, (s) => warnings.push(s), name);
     if (!map) continue;
 
     // triangle budget on top of what the model already has. Bisection to "longest edge <= L" lands near L²/5 per
@@ -724,11 +694,15 @@ export async function applyTextures(
     }
     if (L > L0) warnings.push(`Texture "${name}": coarser mesh (${L.toFixed(2)} mm edges) to keep the triangle count down.`);
 
-    if (!refine(w, sel, L, HARD_TRIS)) {
+    const coarse = w.tris.slice();
+    w.parent = coarse.map((_, i) => i).slice(0, coarse.length / 3);
+    const refined = refine(w, sel, L, HARD_TRIS);
+    if (!refined) {
       warnings.push(`Texture "${name}" skipped: too many triangles. Use a larger pitch or a smaller region.`);
       continue;
     }
-    displace(w, sel, tex, map, field);
+    displace(w, sel, tex, map, field, coarse);
+    delete w.parent;
     const mesh: Mesh = { vertices: Float32Array.from(w.pos), triangles: Uint32Array.from(w.tris) };
     if (!toManifoldOk(wasm, mesh)) {
       warnings.push(`Texture "${name}" skipped: the relief did not produce a valid solid (try a smaller height).`);
@@ -737,7 +711,7 @@ export async function applyTextures(
     total += w.tris.length / 3 - curTris;
     work.set(key, w);
     applied.push(tex);
-    textureStats.perTexture.push({ id: tex.id, ms: performance.now() - ts, triangles: w.tris.length / 3, edge: L, projection: map.kind });
+    textureStats.perTexture.push({ id: tex.id, ms: performance.now() - ts, triangles: w.tris.length / 3, edge: L, projection: map.kind, mapping, distortion: map.distortion });
   }
   if (onProgress) await onProgress(textures.length, textures.length);
   if (total > MAX_TEXTURE_TRIS * 0.8 && applied.length) {

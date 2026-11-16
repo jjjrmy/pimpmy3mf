@@ -42,6 +42,14 @@ Both use the same algorithm.
     stipple, ridges, hex or a pattern from your library, raised or recessed, 0.2–1.5 mm deep, with a
     pitch and angle. All of it is set in the TEXTURE tab; turning the tool on opens that tab. The selected surface is subdivided and pushed along its normals, fading out at the
     edge, so it stays one watertight part. The camo still colors it.
+  - **Mapping** (per area, TEXTURE tab): Auto / Planar / Cylindrical / Unwrap. Auto projects flat
+    faces straight on. On curved ones it measures the pitch along the surface: an arc-length cylinder
+    around the region's axis when that doesn't stretch, otherwise a conformal unwrap of the surface.
+    Full wraps meet seamlessly. Ovals, rounded rectangles, cones and free-form grips keep the same
+    pitch on the sides as on the front. On domes (spheres, capsule ends) the cells stay square but
+    get smaller toward the poles, and the relief fades out at the poles. Areas saved without a
+    mapping use Auto.
+  - `bun scripts/validate-texture-stretch.ts` measures the ridge pitch around each test shape.
 - **UI:** "The 3MF Pimper", styled after the MTV *Pimp My Ride* Flash game.
   - Drag an image or a model anywhere on the page. Loading a model switches to paint mode.
   - The PAINT / DESIGN / COLORS / TEXTURE tabs hold the controls. PAINT picks the model and the camo

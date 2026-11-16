@@ -45,6 +45,8 @@ export class PipelineClient {
   private active: { reqId: number; stage: string | null } | null = null;
   /** Resolves once a replacement worker has its image and model back. */
   private ready: Promise<void> = Promise.resolve();
+  /** Bumped by cancel() and every run, so a run still waiting on `ready` knows it was dropped. */
+  private runGen = 0;
   /** Times the worker was replaced (scripts / debugging). */
   restarts = 0;
 
@@ -176,10 +178,23 @@ export class PipelineClient {
    */
   async run(params: Params, useModel: boolean, onProgress?: ProgressFn): Promise<Result> {
     if (this.active && this.active.stage && UNINTERRUPTIBLE.has(this.active.stage)) this.restart();
+    const gen = ++this.runGen;
     await this.ready;
+    if (gen !== this.runGen) throw new CancelledError();
     const reqId = this.nextId;
     this.active = { reqId, stage: null };
     return this.send((id) => ({ type: 'run', reqId: id, params, useModel }), undefined, onProgress);
+  }
+
+  /**
+   * Stop the run in flight right away (even mid-WASM) by replacing the worker; it rejects with a
+   * CancelledError. Returns whether there was a run to stop.
+   */
+  cancel(): boolean {
+    this.runGen++;
+    const hasRun = !!this.active || [...this.pending.values()].some((p) => p.kind === 'run');
+    if (hasRun) this.restart();
+    return hasRun;
   }
 
   async export(kind: ExportKind, opts: ExportOpts): Promise<ExportResult> {

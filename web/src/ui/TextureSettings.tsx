@@ -1,12 +1,12 @@
-// Settings for a surface-relief grip texture: raised/recessed, height, pitch and rotation, plus the pattern
+// Settings for a surface-relief grip texture: raised/recessed, height, pitch, rotation and mapping, plus the pattern
 // choice helpers (built-ins + the user's library). Used for the NEXT textured area and to edit one in place,
 // both in the TEXTURE tab.
-import type { FaceTexture, TexturePattern } from '../core/types';
+import type { FaceTexture, TextureMapping, TexturePattern } from '../core/types';
 import { Slider } from './Slider';
 import type { LibraryPattern } from './patternLibrary';
 import type { BuiltinPattern } from './patternThumbs';
 
-export type TextureSettings = Pick<FaceTexture, 'mode' | 'height' | 'pitch' | 'rotation'>;
+export type TextureSettings = Pick<FaceTexture, 'mode' | 'height' | 'pitch' | 'rotation' | 'mapping'>;
 /** The pattern part of a FaceTexture. */
 export type PatternChoice = Pick<FaceTexture, 'pattern' | 'image' | 'patternRef'>;
 
@@ -15,7 +15,17 @@ export const DEFAULT_TEXTURE_SETTINGS: TextureSettings = {
   height: 0.6,
   pitch: 2,
   rotation: 0,
+  mapping: 'auto',
 };
+
+export const MAPPINGS: { value: TextureMapping; label: string; title: string }[] = [
+  { value: 'auto', label: 'Auto', title: 'Flat faces: planar. Curved: cylindrical when it fits without stretching, else unwrap' },
+  { value: 'planar', label: 'Planar', title: 'Project straight along the face normal (stretches on curved sides)' },
+  { value: 'cylindrical', label: 'Cylindrical', title: 'Wrap around the region axis; rows follow the axis, spacing measured along the real surface' },
+  { value: 'unwrap', label: 'Unwrap', title: 'Flatten the surface itself: no stretch on any curved shape (cell size may vary on domes)' },
+];
+
+export const mappingLabel = (m: TextureMapping | undefined) => MAPPINGS.find((x) => x.value === (m ?? 'auto'))!.label;
 
 export const BUILTIN_PATTERNS: { value: BuiltinPattern; label: string }[] = [
   { value: 'knurl', label: 'Diamond knurl' },
@@ -101,6 +111,20 @@ export function TextureSettingsForm({ pattern, value, onChange }: TextureSetting
           onChange={(v) => onChange({ rotation: v })}
         />
       )}
+
+      <div className="field tex-field">
+        <span className="field-label">Mapping</span>
+        <div className="segmented segmented-sm" role="group" aria-label="Pattern mapping">
+          {MAPPINGS.map((m) => {
+            const on = (value.mapping ?? 'auto') === m.value;
+            return (
+              <button key={m.value} type="button" className={on ? 'is-active' : ''} aria-pressed={on} title={m.title} onClick={() => onChange({ mapping: m.value })}>
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
