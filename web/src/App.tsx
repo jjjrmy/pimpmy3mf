@@ -292,11 +292,10 @@ export default function App() {
   const [hidden, setHidden] = useState<Set<number>>(new Set());
 
   const [showModifiers, setShowModifiers] = useState(false);
-  // Spin (slow camera orbit): remembered across visits, off by default
-  const [spin, setSpinState] = useState(() => localStorage.getItem('pimpmy3mf.spin') === '1');
+  // Spin (slow camera orbit): off on every visit; grabbing the view turns it off until the button is pressed again
+  const [spin, setSpinState] = useState(false);
   const setSpin = (on: boolean) => {
     setSpinState(on);
-    localStorage.setItem('pimpmy3mf.spin', on ? '1' : '0');
   };
   const [lockAspect, setLockAspect] = useState(true);
 
@@ -1722,6 +1721,7 @@ export default function App() {
                   active={true}
                   activeTool={mode === 'paint' && hasResult ? activeTool : null}
                   spin={spin}
+                  onSpinStop={() => setSpin(false)}
                   toolsPaused={busy}
                   paintedFaces={params.paintedFaces}
                   modelToken={geomToken}
@@ -1778,7 +1778,7 @@ export default function App() {
                     aria-pressed={spin}
                     onClick={() => setSpin(!spin)}
                     title={
-                      (spin ? 'Stop spinning' : 'Slowly spin the view (pauses while you drag or use a tool)') +
+                      (spin ? 'Stop spinning' : 'Slowly spin the view (stops when you drag the view)') +
                       ' · Double-click the view to reset it'
                     }
                   >

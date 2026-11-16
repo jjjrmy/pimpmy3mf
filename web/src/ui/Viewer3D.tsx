@@ -70,8 +70,10 @@ interface Viewer3DProps {
   gizmo?: GizmoSpec | null;
   /** A gizmo handle was dragged: `value` is the snapped total since the press (mm or degrees). */
   onGizmo?: (e: GizmoEvent) => void;
-  /** Slowly orbit the camera (paused while the user drags / zooms and while a face tool is active). */
+  /** Slowly orbit the camera (paused while a face tool is active). */
   spin?: boolean;
+  /** The user grabbed the view (drag / zoom / pan) while it was spinning: spin should turn off. */
+  onSpinStop?: () => void;
 }
 
 /** free: X/Y/Z arrows + rings about X/Y/Z. mate: a ring about the target normal + two in-plane slide arrows. */
@@ -342,13 +344,16 @@ export function Viewer3D({
   gizmo,
   onGizmo,
   spin = false,
+  onSpinStop,
 }: Viewer3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
   const lastFitRef = useRef<string>('');
-  // spin runs only with no face tool active; a drag / zoom pauses it until a moment after the user lets go
+  // spin runs only with no face tool active; grabbing the view turns it off (App clears `spin`)
   const spinRef = useRef(false);
   spinRef.current = spin && !activeTool;
+  const onSpinStopRef = useRef(onSpinStop);
+  onSpinStopRef.current = onSpinStop;
   const orbitBusyRef = useRef(false);
   const spinResumeAtRef = useRef(0);
 
@@ -442,6 +447,10 @@ export function Viewer3D({
     controls.autoRotateSpeed = 3; // with a per-second delta: one turn every 20 s
     controls.addEventListener('start', () => {
       orbitBusyRef.current = true;
+      if (spinRef.current) {
+        spinRef.current = false; // stop this frame, before the prop round-trip
+        onSpinStopRef.current?.();
+      }
     });
     controls.addEventListener('end', () => {
       orbitBusyRef.current = false;
