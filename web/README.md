@@ -74,10 +74,14 @@ Both use the same algorithm.
 - **Paint depth** in both modes, in the web app and the CLI (`--depth MM`; default full). On a
   painted model only an outer shell that deep is colored, so the core prints in filament 1. On an
   image tile the colors fill only its top over a one-color base, and it prints as one piece.
-  - Only the outside surfaces are shelled. Bores, through-holes, blind holes and sealed cavities print in
-    filament 1. A hole is a pocket of (convex hull − part) whose mouth on the hull is under half the area
-    of its walls; an open inside corner or a finger groove stays an outside surface. **Paint inside
-    surfaces** shells them too (`scripts/validate-inner.ts` checks both).
+  - Only the outside surfaces are colored. Inside surfaces (bores, holes, sealed cavities, recessed
+    mounting pockets) print in filament 1, at a set depth and at Full. A triangle is inside when its
+    *openness* is under the **What counts as inside** threshold (0.30 deep holes only … 0.90 shallow dips
+    too; default 0.70). Openness is the share of cosine-weighted rays from the face that escape or hit the
+    part within 3 mm, voxel-marched and smoothed over 1.5 mm, with islands under 20 mm² flipped
+    (`src/core/openness.ts`). Finger grooves, open corners and shallow dishes stay outside at the default.
+    The shell then loses a skin under the inside faces (`src/core/plug.ts`; at Full a 2 mm skin).
+    **Paint inside surfaces** colors them too (`scripts/validate-inner.ts` checks both).
   - The heavy sliders (paint depth, resolution, texture height / pitch / rotation) regenerate when you let
     go. A run stuck behind a long shell or texture build is stopped by replacing the worker.
 - **Filament suggestions:** ◀ ▶ through real filaments for each color, from two merged catalogs:

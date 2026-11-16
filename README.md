@@ -54,9 +54,11 @@ img2color camo.png --colors=3 --thickness=2 --depth=0.4            # one-color 2
 
 **Paint depth** (`--depth MM`, default full) works in both the web app and the CLI. When painting a
 model, only an outer shell MM thick gets the colors, cut to each part's own surface, so the infill
-and inner walls print in filament 1. In the web app the shell only follows the outside surfaces: bores,
-through-holes, blind holes and sealed cavities print in filament 1 too, unless you tick **Paint inside
-surfaces** (say, for a cup's inside). The CLI's shell still follows every surface, holes included. On an image tile thinner than `--thickness`, the 3MF holds one
+and inner walls print in filament 1. In the web app the shell only follows the outside surfaces: inside
+surfaces (bores, holes, sealed cavities, recessed pockets) print in filament 1 too, at any depth including
+Full, unless you tick **Paint inside surfaces** (say, for a cup's inside). The **What counts as inside**
+slider picks how enclosed a surface must be, from deep holes only to shallow dips too. The CLI's shell still
+follows every surface, holes included. On an image tile thinner than `--thickness`, the 3MF holds one
 full-thickness piece on filament 1 with the other colors as modifiers over its top MM, so it prints
 as one piece. The per-color STLs are then the matching pieces: color 1 is the base plus its own top,
 and every other color is its cap.

@@ -134,6 +134,10 @@ function PaintedFaces(props: DesignTabProps) {
 const DEPTH_MIN = 0.2;
 const DEPTH_STEP = 0.1;
 const DEPTH_MAX = 5;
+/** "What counts as inside": the openness threshold, deep holes only (0.30) .. shallow dips too (0.90). */
+const INSIDE_MIN = 0.3;
+const INSIDE_MAX = 0.9;
+const INSIDE_STEP = 0.05;
 
 /** Paint depth: 0.2 mm steps up to 5 mm (or just under the thickness in tile mode), plus a Full notch. */
 function PaintDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' | 'mode' | 'onParams'>) {
@@ -146,13 +150,18 @@ function PaintDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' | 
   const isFull = depth == null || (tile && depth >= params.thickness);
   const shown = isFull ? max : Number(depth.toFixed(2));
   const set = (v: number) => onParams({ depth: tile && v >= params.thickness ? null : Number(v.toFixed(2)) });
-  const hint = isFull
-    ? 'The colors go all the way through.'
-    : tile
-      ? `Top ${shown} mm is colored, on a solid color-1 base.`
-      : params.paintInside
-        ? `Only the outer ${shown} mm is colored, holes and bores included; the inside prints in color 1.`
-        : `Only the outer ${shown} mm of the outside surfaces is colored; holes, bores and the inside print in color 1.`;
+  const paint = !tile;
+  const hint = tile
+    ? isFull
+      ? 'The colors go all the way through.'
+      : `Top ${shown} mm is colored, on a solid color-1 base.`
+    : params.paintInside
+      ? isFull
+        ? 'The colors go all the way through, inside surfaces included.'
+        : `Only the outer ${shown} mm is colored, holes and bores included; the inside prints in color 1.`
+      : isFull
+        ? 'The colors go all the way through; inside surfaces (holes, bores, pockets) print in color 1.'
+        : `Only the outer ${shown} mm of the outside surfaces is colored; inside surfaces and the core print in color 1.`;
   return (
     <section className="control-group">
       <h3 className="tab-subhead">Paint depth</h3>
@@ -167,11 +176,28 @@ function PaintDepth({ params, mode, onParams }: Pick<DesignTabProps, 'params' | 
         commitOnRelease
         onChange={set}
       />
-      {!tile && !isFull && (
+      {paint && (
         <label className="toggle toggle-inline">
           <input type="checkbox" checked={params.paintInside} onChange={(e) => onParams({ paintInside: e.target.checked })} />
           <span>Paint inside surfaces</span>
         </label>
+      )}
+      {paint && !params.paintInside && (
+        <div className="inside-threshold">
+          <Slider
+            label="What counts as inside"
+            min={INSIDE_MIN}
+            max={INSIDE_MAX}
+            step={INSIDE_STEP}
+            value={Number(params.insideThreshold.toFixed(2))}
+            commitOnRelease
+            onChange={(v) => onParams({ insideThreshold: Number(v.toFixed(2)) })}
+          />
+          <span className="slider-ends" aria-hidden="true">
+            <span>Deep holes only</span>
+            <span>Shallow dips too</span>
+          </span>
+        </div>
       )}
       <p className="hint">{hint}</p>
     </section>

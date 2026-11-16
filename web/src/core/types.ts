@@ -184,13 +184,20 @@ export interface Params {
   /**
    * Paint depth in mm; null = Full (default: the pattern goes all the way through).
    * Paint mode: only an outer shell this thick is colored (every camo modifier is intersected with the part's
-   * shell = part minus the inward offset of its hole-plugged envelope); the interior and the walls of bores,
-   * holes and cavities print in filament 1 with no modifiers.
+   * shell = part minus its inward offset, minus a skin under its inside surfaces); the interior and the inside
+   * surfaces (see insideThreshold) print in filament 1 with no modifiers. At Full the colors fill the part except
+   * that skin.
    * Image mode: only the top `depth` mm is multi-color, over a solid filament-1 base; >= thickness = Full.
    */
   depth: number | null;
-  /** Paint mode with a paint depth: also shell the walls of holes, bores and cavities (e.g. a cup's inside). */
+  /** Paint mode: also color the inside surfaces (holes, bores, cavities, recessed pockets; e.g. a cup's inside). */
   paintInside: boolean;
+  /**
+   * Paint mode, "what counts as inside": a triangle is an inside surface (filament 1) when its openness (share
+   * of hemisphere rays that escape or hit within 3 mm) is below this. 0.30 = deep holes only .. 0.90 = shallow
+   * dips too. Ignored with paintInside.
+   */
+  insideThreshold: number;
   /** Paint mode: surface relief regions (texture-face tool), applied in this order. */
   textures: FaceTexture[];
 }
@@ -214,6 +221,7 @@ export const DEFAULT_PARAMS: Params = {
   perPart: false,
   depth: null,
   paintInside: false,
+  insideThreshold: 0.7,
   textures: [],
 };
 
@@ -285,9 +293,9 @@ export interface Result {
   /** Effective paint depth used for this result (null = Full; image mode also null when depth >= thickness). */
   depth: number | null;
   /**
-   * Paint mode with a paint depth (outside surfaces only): per [object][part] of result.model (the textured mesh
-   * when result.shaped has one), the triangles lining holes, bores and cavities. They print in filament 1, so
-   * the preview shows them that way. null = none.
+   * Paint mode without "paint inside surfaces" (any depth, Full included): per [object][part] of result.model
+   * (the textured mesh when result.shaped has one), the inside-surface triangles (holes, bores, cavities,
+   * recessed pockets). They print in filament 1, so the preview shows them that way. null = none.
    */
   innerFaces: (Uint32Array | null)[][] | null;
   /**

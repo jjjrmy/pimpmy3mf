@@ -60,6 +60,7 @@ function buildParams(a: Record<string, string>): Params {
     textures: [],
     depth: a.depth != null && a.depth !== 'full' ? parseFloat(a.depth) : null,
     paintInside: 'paint-inside' in a,
+    insideThreshold: num('inside-threshold', DEFAULT_PARAMS.insideThreshold),
   };
 }
 

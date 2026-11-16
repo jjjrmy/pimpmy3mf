@@ -29,10 +29,10 @@ export class CancelledError extends Error {
 }
 
 /**
- * Stages that run as one long synchronous WASM call (shell erosion, texture re-meshing). The worker can't
+ * Stages that run as one long synchronous call (inside-surface detection, shell erosion, texture re-meshing). The worker can't
  * see a newer run until they return, so a run superseded during one of them is stopped by replacing the worker.
  */
-const UNINTERRUPTIBLE = new Set(['shell', 'texture']);
+const UNINTERRUPTIBLE = new Set(['inside', 'shell', 'texture']);
 
 export class PipelineClient {
   private worker!: Worker;

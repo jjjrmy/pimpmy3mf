@@ -5,9 +5,13 @@
 // REAL pipeline + writeBambuProject through the Bambu CLIs, then read one mid layer of G-code: the wall
 // perimeters around the hole must be filament 1 only, while the outer walls carry several colors.
 //
-//   bun scripts/validate-inner.ts             # probes + every slice case
+// "areas" scores which surfaces count as inside (openness < threshold) on test shapes and the private grip
+// fixture at thresholds 0.30 / 0.70 / 0.90, with acceptance checks at the default.
+//
+//   bun scripts/validate-inner.ts             # probes + areas + every slice case
 //   bun scripts/validate-inner.ts probes      # shell probes only
-//   bun scripts/validate-inner.ts tubeZ tubeX blind cyl inside   # pick slice cases
+//   bun scripts/validate-inner.ts areas       # inside-area table only
+//   bun scripts/validate-inner.ts tubeZ tubeX blind cyl inside tubeFull grip   # pick slice cases
 //
 // Slice wrapper + G-code parsing adapted from validate-depth.ts (not edited). Output: scratch/bambu/inner/.
 import { spawn } from 'node:child_process';
@@ -18,6 +22,8 @@ import { initManifold } from '../src/core/manifold';
 import { createPipeline } from '../src/core/pipeline';
 import { objectsFromResult, writeBambuProject } from '../src/core/threemf';
 import { meshToManifold, partShell, shellStats } from '../src/core/shell';
+import { computeOpenness, insideMask } from '../src/core/openness';
+import { loadModel } from '../src/core/meshio';
 import { DEFAULT_PARAMS } from '../src/core/types';
 import type { Mesh, Model, Params, RasterImage, RGB } from '../src/core/types';
 
@@ -92,6 +98,30 @@ function cavityBox(): ManifoldT {
   b.delete(); c.delete();
   return out;
 }
+/** 40 × 40 × 20 block with a spherical dimple `depth` mm deep and 30 mm across in its top face. */
+function dishBlock(depth: number): ManifoldT {
+  const b = wasm.Manifold.cube([40, 40, 20]);
+  const r = (15 * 15 + depth * depth) / (2 * depth);
+  const s = wasm.Manifold.sphere(r, 192).translate([20, 20, 20 + r - depth]);
+  const out = b.subtract(s);
+  b.delete(); s.delete();
+  return out;
+}
+/** 100 × 25 × 25 bar with three rounded finger grooves (r 8, 4 mm deep) across its top at x = 30 / 50 / 70. */
+function grooveBar(): ManifoldT {
+  let bar = wasm.Manifold.cube([100, 25, 25]);
+  for (const x of [30, 50, 70]) {
+    const c = wasm.Manifold.cylinder(40, 8, 8, SEGS, false).rotate([-90, 0, 0]).translate([x, -5, 25 + 8 - 4]);
+    const n = bar.subtract(c);
+    bar.delete(); c.delete(); bar = n;
+  }
+  return bar;
+}
+const GRIP = `${ROOT}/scratch/user/tailgunner-grip.stl`;
+/** The private grip fixture (never committed), or null when it isn't on this machine. */
+function gripModel(): Model | null {
+  return existsSync(GRIP) ? loadModel(new Uint8Array(readFileSync(GRIP)), 'tailgunner-grip.stl') : null;
+}
 const asModel = (name: string, man: ManifoldT): Model => {
   const mesh = toMesh(man);
   man.delete();
@@ -153,6 +183,98 @@ if (want('probes')) {
       const off = contains(outer, pr.inner), on = contains(inside, pr.inner);
       if (!off && on) ok(`${pr.name}: hole wall skipped by default, shelled with "paint inside surfaces"`);
       else fail(`${pr.name}: hole wall default=${off ? 'shelled' : 'skipped'} inside=${on ? 'shelled' : 'skipped'}`);
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------------ inside areas
+
+const THRESHOLDS = [0.3, 0.7, 0.9];
+const DEFAULT_T = DEFAULT_PARAMS.insideThreshold;
+type Sel = (cx: number, cy: number, cz: number, nz: number) => boolean;
+interface AreaCase {
+  name: string; model: () => Model | null;
+  /** Feature faces whose inside share is reported (by triangle centroid / normal z). */
+  feature?: { name: string; sel: Sel };
+  /** At the default threshold: the feature must be inside (true), or painted (false). */
+  expect?: boolean;
+}
+const areaCases: AreaCase[] = [
+  { name: 'tube OD40/ID30', model: () => asModel('tubeZ', tubeZ()), feature: { name: 'bore', sel: (x, y) => Math.hypot(x - 20, y - 20) < 16 }, expect: true },
+  { name: 'blind hole r6×15', model: () => asModel('blind', blindBox()), feature: { name: 'hole walls + end', sel: (x, y, z) => y > 0.01 && y < 15.01 && Math.hypot(x - 20, z - 15) < 6.1 }, expect: true },
+  { name: 'sealed cavity 20', model: () => asModel('cavity', cavityBox()), feature: { name: 'cavity', sel: (x, y, z) => [x, y, z].every((c) => c > 9.9 && c < 30.1) }, expect: true },
+  { name: 'L bracket', model: () => asModel('L', lBracket()), feature: { name: 'inside-corner faces', sel: (x, y) => (Math.abs(y - 10) < 0.01 && x > 10) || (Math.abs(x - 10) < 0.01 && y > 10) } },
+  { name: 'dish 8 mm deep / 30 across', model: () => asModel('dish8', dishBlock(8)), feature: { name: 'dimple', sel: (x, y, z) => z < 19.99 && Math.hypot(x - 20, y - 20) < 15.1 } },
+  { name: 'dish 2 mm deep / 30 across', model: () => asModel('dish2', dishBlock(2)), feature: { name: 'dimple', sel: (x, y, z) => z < 19.99 && Math.hypot(x - 20, y - 20) < 15.1 }, expect: false },
+  { name: 'finger-groove bar (3 × 4 mm)', model: () => asModel('grooves', grooveBar()), feature: { name: 'grooves', sel: (x, _y, z) => z < 24.99 && z > 20.5 && [30, 50, 70].some((g) => Math.abs(x - g) < 7.5) }, expect: false },
+  { name: 'tailgunner grip (private)', model: gripModel },
+];
+
+/** Per-triangle centroid + normal z, and area. */
+function triInfo(mesh: Mesh) {
+  const v = mesh.vertices, t = mesh.triangles, n = t.length / 3;
+  const c = new Float32Array(n * 4), area = new Float32Array(n);
+  for (let f = 0; f < n; f++) {
+    const a = t[f * 3] * 3, b = t[f * 3 + 1] * 3, d = t[f * 3 + 2] * 3;
+    const ux = v[b] - v[a], uy = v[b + 1] - v[a + 1], uz = v[b + 2] - v[a + 2], wx = v[d] - v[a], wy = v[d + 1] - v[a + 1], wz = v[d + 2] - v[a + 2];
+    const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx, l = Math.hypot(nx, ny, nz);
+    area[f] = l / 2;
+    for (let k = 0; k < 3; k++) c[f * 4 + k] = (v[a + k] + v[b + k] + v[d + k]) / 3;
+    c[f * 4 + 3] = l ? nz / l : 0;
+  }
+  return { c, area };
+}
+const pctOf = (mask: Uint8Array, area: Float32Array, pick?: (f: number) => boolean) => {
+  let a = 0, s = 0;
+  for (let f = 0; f < mask.length; f++) { if (pick && !pick(f)) continue; s += area[f]; if (mask[f]) a += area[f]; }
+  return { pct: s ? (a / s) * 100 : 0, area: s };
+};
+
+if (want('areas')) {
+  console.log(`\n# inside areas (openness < t), thresholds ${THRESHOLDS.join(' / ')}, default ${DEFAULT_T}`);
+  console.log('  | case | tris | openness ms | inside % of surface (0.30 / 0.70 / 0.90) | feature inside % (0.30 / 0.70 / 0.90) |');
+  console.log('  |---|---|---|---|---|');
+  for (const ac of areaCases) {
+    const model = ac.model();
+    if (!model) { console.log(`  skip ${ac.name}: fixture not found`); continue; }
+    const mesh = model.objects[0].parts[0].mesh;
+    const o = computeOpenness(mesh);
+    const { c, area } = triInfo(mesh);
+    const masks = THRESHOLDS.map((t) => insideMask(o, t));
+    const total = masks.map((m) => pctOf(m, area).pct.toFixed(1)).join(' / ');
+    const sel = ac.feature ? (f: number) => ac.feature!.sel(c[f * 4], c[f * 4 + 1], c[f * 4 + 2], c[f * 4 + 3]) : undefined;
+    const feat = sel ? `${ac.feature!.name}: ${masks.map((m) => pctOf(m, area, sel).pct.toFixed(1)).join(' / ')}` : '-';
+    console.log(`  | ${ac.name} | ${mesh.triangles.length / 3} | ${o.stats.ms.toFixed(0)} | ${total} | ${feat} |`);
+    if (sel && ac.expect != null) {
+      const m = insideMask(o, DEFAULT_T);
+      const p = pctOf(m, area, sel);
+      if (p.area <= 0) fail(`${ac.name}: no ${ac.feature!.name} faces selected`);
+      else if (ac.expect ? p.pct >= 95 : p.pct <= 2) ok(`${ac.name}: ${ac.feature!.name} ${p.pct.toFixed(1)}% inside at ${DEFAULT_T} (${ac.expect ? 'inside' : 'painted'})`);
+      else fail(`${ac.name}: ${ac.feature!.name} ${p.pct.toFixed(1)}% inside at ${DEFAULT_T}, expected ${ac.expect ? 'inside' : 'painted'}`);
+    }
+    if (ac.name.startsWith('tailgunner')) {
+      console.log(`  grip openness: ${o.stats.ms.toFixed(0)} ms total (grid ${o.stats.grid.toFixed(0)} ms, rays ${o.stats.rays.toFixed(0)} ms), ${o.stats.samples} samples in ${o.stats.buckets} buckets`);
+      // acceptance against the research segmentation of the same STL (private, alongside it in scratch/user)
+      const segPath = GRIP.replace(/\.stl$/, '.segments.bin');
+      if (!existsSync(segPath)) { console.log('  skip grip acceptance: no segments file'); continue; }
+      const seg = new Int32Array(readFileSync(segPath).buffer.slice(0));
+      if (seg.length !== mesh.triangles.length / 3) { fail(`grip segments: ${seg.length} labels for ${mesh.triangles.length / 3} triangles`); continue; }
+      const m = insideMask(o, DEFAULT_T);
+      const share = (ids: number[]) => pctOf(m, area, (f) => ids.includes(seg[f]));
+      const checks: [string, number[], (p: number) => boolean, string][] = [
+        // seg 11 also holds the outer bottom rim (about 30% of it), which stays painted
+        ['(a) hollow interior + bottom rim (seg 11)', [11], (p) => p >= 65, '>= 65%'],
+        ['(a) through-hole into the cavity', [8], (p) => p >= 95, '>= 95%'],
+        ['(b) mount channel walls / floor / end face', [6, 4, 9, 129], (p) => p >= 95, '>= 95%'],
+        ['(b) channel screw hole', [128], (p) => p >= 95, '>= 95%'],
+        ['(c) outer grip front/side + back/side (grooves included)', [12, 16], (p) => p <= 1, '<= 1%'],
+        ['(c) top tang / rail', [1], (p) => p <= 5, '<= 5%'],
+      ];
+      for (const [label, ids, pass, want] of checks) {
+        const p = share(ids);
+        if (pass(p.pct)) ok(`grip ${label}: ${p.pct.toFixed(1)}% inside of ${p.area.toFixed(0)} mm² (${want})`);
+        else fail(`grip ${label}: ${p.pct.toFixed(1)}% inside of ${p.area.toFixed(0)} mm², want ${want}`);
+      }
     }
   }
 }
@@ -257,8 +379,9 @@ function wallTools(layer: LayerInfo, isHole: (mx: number, my: number) => boolean
 const fmt = (m: Map<number, number>) => [...m.entries()].sort((a, b) => a[0] - b[0]).map(([t, n]) => `T${t}:${n}`).join(' ') || '-';
 
 interface Case {
-  tag: string; label: string; model: () => Model; params: Params; layerZ: number;
-  isHole: (mx: number, my: number) => boolean | null;
+  tag: string; label: string; model: () => Model | null; params: Params; layerZ: number;
+  /** null = only check the slice succeeds and every filament prints (no known hole layout). */
+  isHole: ((mx: number, my: number) => boolean | null) | null;
   /** true = hole walls must be filament 1 only; false = they must carry several colors ("paint inside" on). */
   holeBase: boolean;
 }
@@ -266,6 +389,12 @@ const tubeHole = (mx: number, my: number) => {
   // the layer's wall bbox is the 40 mm OD square: center (20, 20)
   const r = Math.hypot(mx - 20, my - 20);
   return r < 17 ? true : r > 18 ? false : null;
+};
+// Full: the colors start where the 2 mm skin under the bore ends (r ≈ 17), so judge only the bore's own wall
+// loops (r < 16.6, three 0.45 mm loops from r = 15)
+const tubeFullHole = (mx: number, my: number) => {
+  const r = Math.hypot(mx - 20, my - 20);
+  return r < 16.6 ? true : r > 18 ? false : null;
 };
 const tubeXHole = (mx: number, my: number) => {
   // a horizontal slice through the axis is two 5 mm strips (y 0..5 and 35..40): the hole walls face y = 20.
@@ -286,19 +415,26 @@ const cases: Case[] = [
   { tag: 'tubeX', label: 'tube lying along X, planar front, depth 0.6', model: () => asModel('tubeX', tubeX()), params: P({ axis: 'y' }), layerZ: 20, isHole: tubeXHole, holeBase: true },
   { tag: 'blind', label: 'box with a blind hole in the front face, planar front, depth 0.6', model: () => asModel('blind', blindBox()), params: P({ axis: 'y' }), layerZ: 15, isHole: blindHole, holeBase: true },
   { tag: 'inside', label: 'tube standing, planar front, depth 0.6, paint inside surfaces ON', model: () => asModel('tubeZ', tubeZ()), params: P({ axis: 'y', paintInside: true }), layerZ: 30, isHole: tubeHole, holeBase: false },
+  { tag: 'tubeFull', label: 'tube standing, planar front, Full depth (inside skin only)', model: () => asModel('tubeZ', tubeZ()), params: P({ axis: 'y', depth: null }), layerZ: 30, isHole: tubeFullHole, holeBase: true },
+  { tag: 'grip', label: 'tailgunner grip (private), planar front, depth 0.6, default inside threshold', model: gripModel, params: P({ axis: 'y' }), layerZ: 0, isHole: null, holeBase: true },
 ];
 
 const stripes = stripeImage();
 const VERSIONS = ['2.8', '1.10'];
 for (const c of cases.filter((c) => want(c.tag))) {
   console.log(`\n# ${c.tag}: ${c.label}`);
+  const model = c.model();
+  if (!model) { console.log('  skip: fixture not found'); continue; }
   const pipe = createPipeline();
   shellStats.ms = 0;
-  const result = await pipe.run(stripes, c.model(), c.params);
+  const t0 = performance.now();
+  const result = await pipe.run(stripes, model, c.params);
+  const runMs = performance.now() - t0;
   pipe.dispose();
   const colors = result.regions.map((r) => r.hex.toUpperCase());
   const objects = objectsFromResult(result, colors, c.tag);
-  console.log(`  shell build ${shellStats.ms.toFixed(0)} ms, ${objects[0].parts.length} parts`);
+  const innerN = result.innerFaces?.flat().reduce((s, r) => s + (r?.length ?? 0), 0) ?? 0;
+  console.log(`  pipeline ${runMs.toFixed(0)} ms, shell build ${shellStats.ms.toFixed(0)} ms (inside ${shellStats.insideMs.toFixed(0)}, erode ${shellStats.erodeMs.toFixed(0)}, skin ${shellStats.skinMs.toFixed(0)}), ${objects[0].parts.length} parts, ${innerN} inside triangles`);
   const { bytes } = await writeBambuProject(objects, { printerId: 'x1c-0.4', filamentColors: colors });
   const file = `${OUT}/${c.tag}-x1c-0.4.3mf`;
   writeFileSync(file, bytes);
@@ -311,6 +447,10 @@ for (const c of cases.filter((c) => want(c.tag))) {
     }
     const missing = [0, 1, 2].filter((t) => !s.gcode!.extrudePerTool.get(t));
     if (missing.length) fail(`${label}: no extrusion on T${missing.join(',T')}`);
+    if (!c.isHole) {
+      if (!missing.length) ok(`${label}: exit 0, ${(s.ms / 1000).toFixed(0)}s, extrusion on ${fmt(s.gcode.extrudePerTool)}`);
+      continue;
+    }
     const layer = nearestLayer(s.gcode, c.layerZ);
     const { hole, outside } = wallTools(layer, c.isHole);
     const detail = `z=${layer.z} hole walls ${fmt(hole)} | outer walls ${fmt(outside)}`;

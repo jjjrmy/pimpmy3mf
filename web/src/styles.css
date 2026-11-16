@@ -298,6 +298,16 @@ body {
 }
 
 /* ---- generic text ---- */
+.slider-ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: var(--text-tiny);
+}
+.inside-threshold {
+  margin-top: 10px;
+}
 .hint {
   margin: 8px 0 0;
   color: rgba(255, 255, 255, 0.74);

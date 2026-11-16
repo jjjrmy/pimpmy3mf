@@ -5,6 +5,7 @@ import type {
   Pipeline, RasterImage, Mesh, Model, ModelObject, ModelPart, Params, Result, ColorRegion, Axis, RGB, RunOptions, FaceSkin,
   Projection, CylinderFrame,
 } from './types';
+import { DEFAULT_PARAMS } from './types';
 import { initManifold } from './manifold';
 import { quantize, toHex, type QuantizeResult } from './color';
 import { resample, despeckle, type Affine } from './raster';
@@ -322,21 +323,26 @@ export function createPipeline(): Pipeline {
       eRegions = regions; eKey = e3Key;
     }
 
-    // ---- stage 3b: paint depth. Paint: clip every modifier to the parts' outer shell. Image: base + caps ----
+    // ---- stage 3b: paint depth. Paint: clip every modifier to the parts' outer shell (Full: to the parts minus
+    // a skin under their inside surfaces). Image: base + caps ----
     const want = params.depth != null && Number.isFinite(params.depth) && params.depth > 0 ? params.depth : null;
     const depth = geom.mode === 'image' ? (want != null && want < params.thickness ? want : null) : want;
-    const inside = geom.mode === 'paint' && depth != null && !!params.paintInside;
-    const d3Key = `${e3Key}|${depth ?? 'F'}|${inside ? 'in' : 'out'}`;
+    const inside = geom.mode === 'paint' && !!params.paintInside;
+    const threshold = Number.isFinite(params.insideThreshold) ? params.insideThreshold : DEFAULT_PARAMS.insideThreshold;
+    const d3Key = `${e3Key}|${depth ?? 'F'}|${inside ? 'in' : `out:${threshold}`}`;
     if (dKey !== d3Key || !dRegions) {
       dInner = null;
-      if (depth == null) {
-        dRegions = eRegions!; dBase = null;
-      } else if (geom.mode === 'paint' && model) {
-        const set = shellCache.get(model, depth, inside)
-          ?? await shellCache.build(wasm, model, depth, inside, (done, total) => tick('shell', total ? done / total : undefined));
+      const shelled = geom.mode === 'paint' && model && (depth != null || !inside);
+      if (shelled) {
+        const set = shellCache.get(model!, depth, inside, threshold)
+          ?? await shellCache.build(wasm, model!, depth, inside, threshold, (stage, done, total) => tick(stage, total ? done / total : undefined));
         await tick('shell', 1);
-        dRegions = clipRegionsToShells(wasm, eRegions!, set.shells); dBase = null;
         dInner = set.inner.some((row) => row.some((r) => !!r)) ? set.inner : null;
+        // Full with nothing inside: the modifiers stay as they are
+        dRegions = depth == null && !dInner ? eRegions! : clipRegionsToShells(wasm, eRegions!, set.shells);
+        dBase = null;
+      } else if (depth == null || geom.mode === 'paint') {
+        dRegions = eRegions!; dBase = null;
       } else {
         const sp = splitTile(wasm, eRegions!, params.thickness, depth);
         dRegions = sp.regions; dBase = sp.base;

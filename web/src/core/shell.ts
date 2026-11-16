@@ -1,28 +1,29 @@
 // Paint depth: clip the color modifiers to an outer shell of the model, or (image mode) split the tile into a
 // filament-1 base and per-color caps.
 //
-// shell(part) = part − erode(E, X), where E is the part's outer envelope: the part with its holes plugged
-// (bores, through-holes, blind holes, sealed cavities), so the shell hugs only the outside surfaces and those
-// holes print in filament 1. With "paint inside surfaces" E is the part itself. Erosion = minkowskiDifference
-// with an 8-segment ball whose axis-aligned half-extents are exactly X, on a simplified copy (minkowski cost
-// grows with triangle count). The outer surface of the shell is the original part, so the visible boundary
-// stays exact.
+// shell(part) = part − erode(part, X) − insideSkin, where erode = minkowskiDifference with an 8-segment ball
+// whose axis-aligned half-extents are exactly X, on a simplified copy (minkowski cost grows with triangle
+// count). The outer surface of the shell is the original part, so the visible boundary stays exact.
 //
-// Holes: the empty space inside the part's convex hull (hull − part), split into connected pockets. A pocket
-// is a hole when the area it opens onto the hull (its mouth) is under HOLE_MOUTH_RATIO of the area it shares
-// with the part (its walls): a bore 15 mm in radius and 60 mm long is 0.25, a blind hole 0.2, a sealed
-// cavity 0
+// Inside surfaces (bores, cavities, recessed pockets) print in filament 1: openness.ts scores every triangle
+// by how much sky it sees and labels the ones under the "what counts as inside" threshold, and plug.ts builds
+// the solid within reach of those faces (and nearer to them than to any outside face). Subtracting it removes
+// the shell under inside faces while outside faces keep the full depth. At Full depth the shell is the whole
+// part minus a FULL_SKIN mm skin under the inside faces. "Paint inside surfaces" skips the labelling.
 import type { ManifoldToplevel, Manifold as ManifoldT } from 'manifold-3d';
 import type { ColorRegion, Mesh, Model } from './types';
 import { meshFromManifold } from './extrude';
+import { meshOpenness, hasOpenness, insideMask } from './openness';
+import { insideSkin, nearField } from './plug';
 
 const MAX_ERODE_TRIS = 20_000;
-/** A pocket of hull − part is a hole (no camo inside) when mouth area < this × wall area. An open L corner or a
- *  finger groove is ~0.6–0.9, so those stay outside surfaces and keep their camo. */
-const HOLE_MOUTH_RATIO = 0.5;
+/** Full depth: at least this much filament 1 lies under inside faces (mm); several wall loops' worth. */
+export const FULL_SKIN = 2;
+/** Default "what counts as inside" threshold (openness below it = inside). */
+export const DEFAULT_INSIDE_THRESHOLD = 0.7;
 
-/** Wall time of the last shell (erosion) builds, for scripts. Reset by buildShells on every cache miss. */
-export const shellStats = { ms: 0, parts: 0, erodeTris: [] as number[] };
+/** Wall time of the last shell builds, for scripts. Reset by ShellCache.build on every cache miss. */
+export const shellStats = { ms: 0, parts: 0, erodeTris: [] as number[], insideMs: 0, skinMs: 0, erodeMs: 0 };
 
 /** Our Mesh -> manifold (merging coincident vertices so unwelded soup still closes). */
 export function meshToManifold(wasm: ManifoldToplevel, mesh: Mesh): ManifoldT {
@@ -41,153 +42,119 @@ function axisBall(wasm: ManifoldToplevel, x: number): ManifoldT {
   return ball;
 }
 
-/** Summed triangle area of a manifold mesh, split by the original mesh each triangle run came from. */
-function areaByOrigin(m: ManifoldT): Map<number, number> {
-  const mesh = m.getMesh();
-  const { vertProperties: v, triVerts: t, numProp } = mesh;
-  const runIndex = mesh.runIndex ?? new Uint32Array([0, t.length]);
-  const runId = mesh.runOriginalID ?? new Uint32Array([0]);
-  const out = new Map<number, number>();
-  for (let r = 0; r < runId.length; r++) {
-    let a = 0;
-    for (let i = runIndex[r]; i < runIndex[r + 1]; i += 3) {
-      const p = t[i] * numProp, q = t[i + 1] * numProp, w = t[i + 2] * numProp;
-      const ux = v[q] - v[p], uy = v[q + 1] - v[p + 1], uz = v[q + 2] - v[p + 2];
-      const wx = v[w] - v[p], wy = v[w + 1] - v[p + 1], wz = v[w + 2] - v[p + 2];
-      const cx = uy * wz - uz * wy, cy = uz * wx - ux * wz, cz = ux * wy - uy * wx;
-      a += Math.sqrt(cx * cx + cy * cy + cz * cz) / 2;
+/** The part's shell X thick under every face, and the simplify tolerance it used (so the shell can reach up to
+ *  X + tol deep). Cached per mesh object and depth: moving the inside threshold doesn't erode again. */
+interface Eroded { shell: Mesh | null; tol: number }
+const erodeCache = new WeakMap<Mesh, Map<number, Eroded>>();
+const ERODE_CACHE_SIZE = 4;
+
+function erodedShell(wasm: ManifoldToplevel, mesh: Mesh, x: number): Eroded {
+  let per = erodeCache.get(mesh);
+  const hit = per?.get(x);
+  if (hit) { per!.delete(x); per!.set(x, hit); return hit; }
+  const t0 = performance.now();
+  const part = meshToManifold(wasm, mesh);
+  let out: Eroded = { shell: null, tol: 0 };
+  if (!part.isEmpty()) {
+    let tol = x / 4;
+    let simp = part.simplify(tol);
+    for (const t of [x / 2, x]) {
+      if (simp.numTri() <= MAX_ERODE_TRIS) break;
+      const s2 = part.simplify(t);
+      simp.delete(); simp = s2; tol = t;
     }
-    out.set(runId[r], (out.get(runId[r]) ?? 0) + a);
+    shellStats.erodeTris.push(simp.numTri());
+    const ball = axisBall(wasm, x);
+    const eroded = simp.minkowskiDifference(ball);
+    simp.delete(); ball.delete();
+    const shell = eroded.isEmpty() ? part : part.subtract(eroded);
+    out = { shell: !shell.isEmpty() && shell.volume() > 1e-9 ? meshFromManifold(shell) : null, tol };
+    if (shell !== part) shell.delete();
+    eroded.delete();
   }
+  part.delete();
+  if (!per) { per = new Map(); erodeCache.set(mesh, per); }
+  per.set(x, out);
+  while (per.size > ERODE_CACHE_SIZE) per.delete(per.keys().next().value!);
+  shellStats.erodeMs += performance.now() - t0;
   return out;
 }
 
-/** Our Mesh -> manifold whose triangles carry their index in `mesh` as faceID, under a fresh original ID, so
- *  boolean results can be traced back to the part's own triangles. */
-function taggedManifold(wasm: ManifoldToplevel, mesh: Mesh): { man: ManifoldT; id: number } {
-  const id = wasm.Manifold.reserveIDs(1);
-  const nTri = mesh.triangles.length / 3;
-  const faceID = new Uint32Array(nTri);
-  for (let i = 0; i < nTri; i++) faceID[i] = i;
-  const m = new wasm.Mesh({
-    numProp: 3, vertProperties: mesh.vertices, triVerts: mesh.triangles,
-    runIndex: new Uint32Array([0, mesh.triangles.length]), runOriginalID: new Uint32Array([id]), faceID,
-  });
-  m.merge();
-  return { man: wasm.Manifold.ofMesh(m), id };
-}
-
-/**
- * Holes and cavities in the part, judged against its convex hull (caller deletes `holes`). `walls` are the
- * indices of the part's triangles that line them (only when the part was built by taggedManifold with `pid`).
- */
-export function partHoles(wasm: ManifoldToplevel, part: ManifoldT, pid?: number): { holes: ManifoldT[]; walls: Set<number> } {
-  const P = pid == null ? part.asOriginal() : part;
-  const partId = pid ?? P.originalID();
-  const H = part.hull().asOriginal();
-  const hid = H.originalID();
-  const voids = H.subtract(P);
-  H.delete();
-  if (P !== part) P.delete();
-  const walls = new Set<number>();
-  if (voids.isEmpty()) { voids.delete(); return { holes: [], walls }; }
-  const pockets = voids.decompose();
-  voids.delete();
-  const holes: ManifoldT[] = [];
-  for (const c of pockets) {
-    const areas = areaByOrigin(c);
-    const mouth = areas.get(hid) ?? 0, wallArea = areas.get(partId) ?? 0;
-    if (wallArea > 0 && mouth < HOLE_MOUTH_RATIO * wallArea && c.volume() > 1e-6) {
-      holes.push(c);
-      if (pid != null) {
-        const mesh = c.getMesh();
-        const runIndex = mesh.runIndex, runId = mesh.runOriginalID, faceID = mesh.faceID;
-        if (runIndex && runId && faceID) {
-          for (let r = 0; r < runId.length; r++) {
-            if (runId[r] !== pid) continue;
-            for (let i = runIndex[r]; i < runIndex[r + 1]; i += 3) walls.add(faceID[i / 3]);
-          }
-        }
-      }
-    } else c.delete();
-  }
-  void wasm;
-  return { holes, walls };
-}
-
-/** The part with its holes plugged (caller deletes; null when it has none) and the part triangles that line them. */
-function outerEnvelope(wasm: ManifoldToplevel, part: ManifoldT, pid: number): { env: ManifoldT | null; walls: Set<number> } {
-  const { holes, walls } = partHoles(wasm, part, pid);
-  if (!holes.length) return { env: null, walls };
-  const env = wasm.Manifold.union([part, ...holes]);
-  for (const h of holes) h.delete();
-  return { env, walls };
-}
-
-/** One part's paint-depth shell, and (outside-only shells) the part's triangles that line its holes. */
+/** One part's paint-depth shell, and the part's triangles that stay filament 1. */
 export interface PartShell {
+  /** The solid the color modifiers are clipped to (Full with no inside faces: the part mesh itself). */
   shell: Mesh | null;
-  /** Indices into the part mesh's triangles that print in filament 1 (hole / cavity walls). null = none. */
+  /** Indices into the part mesh's triangles that print in filament 1 (inside surfaces). null = none. */
   inner: Uint32Array | null;
+}
+
+/** The part's inside-labelled triangles at `threshold` (null = none). */
+export function insideFaces(mesh: Mesh, threshold: number): Uint8Array | null {
+  const t0 = performance.now();
+  const mask = insideMask(meshOpenness(mesh), threshold);
+  shellStats.insideMs += performance.now() - t0;
+  return mask.some((m) => m === 1) ? mask : null;
 }
 
 /**
  * One part's shell X mm thick, as a Mesh (null if empty). Only the outer surfaces are shelled unless
  * `paintInside`, which shells the hole and cavity walls too.
  */
-export function partShell(wasm: ManifoldToplevel, mesh: Mesh, x: number, paintInside = false): Mesh | null {
-  return partShellInfo(wasm, mesh, x, paintInside).shell;
+export function partShell(wasm: ManifoldToplevel, mesh: Mesh, x: number, paintInside = false, threshold = DEFAULT_INSIDE_THRESHOLD): Mesh | null {
+  return partShellInfo(wasm, mesh, x, paintInside, threshold).shell;
 }
 
-export function partShellInfo(wasm: ManifoldToplevel, mesh: Mesh, x: number, paintInside = false): PartShell {
-  const { man: part, id } = taggedManifold(wasm, mesh);
-  if (part.isEmpty()) { part.delete(); return { shell: null, inner: null }; }
-  const { env, walls } = paintInside ? { env: null, walls: new Set<number>() } : outerEnvelope(wasm, part, id);
-  const inner = walls.size ? Uint32Array.from([...walls].sort((a, b) => a - b)) : null;
-  // per-triangle faceIDs (for tracing hole walls) would stop simplify() from merging anything: erode a copy
-  // without them
-  const src = (env ?? part).asOriginal();
-  let simp = src.simplify(x / 4);
-  for (const tol of [x / 2, x]) {
-    if (simp.numTri() <= MAX_ERODE_TRIS) break;
-    const s2 = src.simplify(tol);
-    simp.delete(); simp = s2;
+/** `x` null = Full depth: the whole part, minus a skin under the inside faces. */
+export function partShellInfo(
+  wasm: ManifoldToplevel, mesh: Mesh, x: number | null, paintInside = false, threshold = DEFAULT_INSIDE_THRESHOLD,
+): PartShell {
+  const mask = paintInside ? null : insideFaces(mesh, threshold);
+  const base = x == null ? { shell: mesh, tol: 0 } : erodedShell(wasm, mesh, x);
+  if (!mask || !base.shell) return { shell: base.shell, inner: null };
+  const inner: number[] = [];
+  for (let f = 0; f < mask.length; f++) if (mask[f]) inner.push(f);
+  const t0 = performance.now();
+  const reach = x == null ? FULL_SKIN : x + base.tol;
+  let field = nearField(mesh, Math.max(reach + 1, FULL_SKIN + 1.5));
+  // the level set sits within about a cell of the true distance: one cell of margin covers the whole shell
+  const r = x == null ? FULL_SKIN + field.h / 2 : reach + field.h;
+  if (r > field.radius) field = nearField(mesh, r);
+  const skin = insideSkin(wasm, field, mask, r);
+  let out: Mesh | null = base.shell;
+  if (skin) {
+    const sh = meshToManifold(wasm, base.shell);
+    const cut = sh.subtract(skin);
+    out = !cut.isEmpty() && cut.volume() > 1e-9 ? meshFromManifold(cut) : null;
+    cut.delete(); sh.delete(); skin.delete();
   }
-  src.delete();
-  env?.delete();
-  shellStats.erodeTris.push(simp.numTri());
-  const ball = axisBall(wasm, x);
-  const eroded = simp.minkowskiDifference(ball);
-  simp.delete(); ball.delete();
-  const shell = eroded.isEmpty() ? part : part.subtract(eroded);
-  const out = !shell.isEmpty() && shell.volume() > 1e-9 ? meshFromManifold(shell) : null;
-  if (shell !== part) shell.delete();
-  eroded.delete(); part.delete();
-  return { shell: out, inner };
+  shellStats.skinMs += performance.now() - t0;
+  return { shell: out, inner: Uint32Array.from(inner) };
 }
 
-/** How many depth settings stay cached per model, so stepping back to a recent depth is instant. */
+/** How many (depth, inside) settings stay cached per model, so stepping back to a recent one is instant. */
 const SHELL_CACHE_SIZE = 4;
 
-/** One build: per [object][part], the shell and the hole-wall triangles. */
+/** One build: per [object][part], the shell and the inside triangles. */
 export interface ShellSet {
   shells: (Mesh | null)[][];
   inner: (Uint32Array | null)[][];
 }
 
-/** Shell cache: per oriented model identity, the last few (depth, paintInside) builds. */
+type ShellProgress = (stage: 'inside' | 'shell', done: number, total: number) => Promise<void>;
+
+/** Shell cache: per oriented model identity, the last few (depth, paintInside, threshold) builds. */
 export class ShellCache {
   private model: Model | null = null;
   private entries = new Map<string, ShellSet>();
 
-  private static key(x: number, paintInside: boolean): string {
-    return `${x}|${paintInside ? 'in' : 'out'}`;
+  private static key(x: number | null, paintInside: boolean, threshold: number): string {
+    return `${x ?? 'F'}|${paintInside ? 'in' : `out:${threshold}`}`;
   }
 
-  /** Cached shells for `model` at depth `x`, or null when they still need building. */
-  get(model: Model, x: number, paintInside = false): ShellSet | null {
+  /** Cached shells for `model` at depth `x` (null = Full), or null when they still need building. */
+  get(model: Model, x: number | null, paintInside = false, threshold = DEFAULT_INSIDE_THRESHOLD): ShellSet | null {
     if (this.model !== model) return null;
-    const k = ShellCache.key(x, paintInside);
+    const k = ShellCache.key(x, paintInside, threshold);
     const hit = this.entries.get(k);
     if (!hit) return null;
     this.entries.delete(k); this.entries.set(k, hit); // most recent last
@@ -195,13 +162,13 @@ export class ShellCache {
   }
 
   async build(
-    wasm: ManifoldToplevel, model: Model, x: number, paintInside = false,
-    onPart?: (done: number, total: number) => Promise<void>,
+    wasm: ManifoldToplevel, model: Model, x: number | null, paintInside = false, threshold = DEFAULT_INSIDE_THRESHOLD,
+    onProgress?: ShellProgress,
   ): Promise<ShellSet> {
-    const hit = this.get(model, x, paintInside);
+    const hit = this.get(model, x, paintInside, threshold);
     if (hit) return hit;
     const t0 = performance.now();
-    shellStats.erodeTris = [];
+    shellStats.erodeTris = []; shellStats.insideMs = 0; shellStats.skinMs = 0; shellStats.erodeMs = 0;
     const total = model.objects.reduce((s, o) => s + o.parts.length, 0);
     let done = 0;
     const set: ShellSet = { shells: [], inner: [] };
@@ -209,8 +176,9 @@ export class ShellCache {
       const row: (Mesh | null)[] = [];
       const innerRow: (Uint32Array | null)[] = [];
       for (const p of obj.parts) {
-        if (onPart) await onPart(done, total);
-        const info = partShellInfo(wasm, p.mesh, x, paintInside);
+        if (onProgress && !paintInside && !hasOpenness(p.mesh)) await onProgress('inside', done, total);
+        if (onProgress) await onProgress('shell', done, total);
+        const info = partShellInfo(wasm, p.mesh, x, paintInside, threshold);
         row.push(info.shell);
         innerRow.push(info.inner);
         done++;
@@ -220,7 +188,7 @@ export class ShellCache {
     }
     shellStats.ms = performance.now() - t0; shellStats.parts = total;
     if (this.model !== model) { this.model = model; this.entries.clear(); }
-    this.entries.set(ShellCache.key(x, paintInside), set);
+    this.entries.set(ShellCache.key(x, paintInside, threshold), set);
     while (this.entries.size > SHELL_CACHE_SIZE) this.entries.delete(this.entries.keys().next().value!);
     return set;
   }

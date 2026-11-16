@@ -45,6 +45,7 @@ const MATERIAL_KEY = 'pimpmy3mf.material';
 const BRANDS_KEY = 'pimpmy3mf.brands';
 const DEPTH_KEY = 'pimpmy3mf.depth';
 const PAINT_INSIDE_KEY = 'pimpmy3mf.paintInside';
+const INSIDE_THRESHOLD_KEY = 'pimpmy3mf.insideThreshold';
 const PATTERN_KEY = 'pimpmy3mf.texturePattern';
 
 /** Saved paint depth: a positive mm value, or null (Full; stored as 'full' or absent). The key predates the
@@ -54,6 +55,10 @@ function loadDepth(): number | null {
   if (saved == null || saved === 'full') return null;
   const v = parseFloat(saved);
   return Number.isFinite(v) && v > 0 ? v : null;
+}
+function loadInsideThreshold(): number {
+  const v = parseFloat(localStorage.getItem(INSIDE_THRESHOLD_KEY) ?? '');
+  return Number.isFinite(v) && v >= 0.3 && v <= 0.9 ? v : DEFAULT_PARAMS.insideThreshold;
 }
 /** Saved grip pattern for the next textured area: a built-in name or `lib:<id>` (default Diamond knurl). */
 function loadPatternKey(): PatternKey {
@@ -81,6 +86,8 @@ function friendlyStage(stage: string | null): string {
       return 'Building 3D…';
     case 'paint':
       return 'Painting faces…';
+    case 'inside':
+      return 'Finding inside surfaces…';
     case 'shell':
       return 'Carving the shell…';
     case 'texture':
@@ -148,6 +155,7 @@ export default function App() {
     ...DEFAULT_PARAMS,
     depth: loadDepth(),
     paintInside: localStorage.getItem(PAINT_INSIDE_KEY) === '1',
+    insideThreshold: loadInsideThreshold(),
   }));
   // Mode is implicit: a model loaded means paint mode, none means flat tile mode. Only ever changed by
   // loading / clearing a model, so it stays in sync with `model`.
@@ -228,6 +236,9 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(PAINT_INSIDE_KEY, params.paintInside ? '1' : '0');
   }, [params.paintInside]);
+  useEffect(() => {
+    localStorage.setItem(INSIDE_THRESHOLD_KEY, String(params.insideThreshold));
+  }, [params.insideThreshold]);
 
   // reset overrides + visibility when the palette definition changes
   useEffect(() => {
