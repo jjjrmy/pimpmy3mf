@@ -65,6 +65,8 @@ const DEPTH_DEFAULT_V2_KEY = 'pimpmy3mf.depthDefaultV2';
 const DEFAULT_DEPTH_MM = 1;
 const PAINT_INSIDE_KEY = 'pimpmy3mf.paintInside';
 const INSIDE_THRESHOLD_KEY = 'pimpmy3mf.insideThreshold';
+/** Set once the inside-threshold default moved from 0.70 to 0.60 (a stored 0.7 before then was the old default). */
+const INSIDE_DEFAULT_V2_KEY = 'pimpmy3mf.insideDefaultV2';
 const PATTERN_KEY = 'pimpmy3mf.texturePattern';
 
 /** Saved paint depth: a positive mm value, or null (Full, stored as 'full'). Absent = DEFAULT_DEPTH_MM. The key
@@ -83,6 +85,10 @@ function loadDepth(): number | null {
 }
 function loadInsideThreshold(): number {
   const v = parseFloat(localStorage.getItem(INSIDE_THRESHOLD_KEY) ?? '');
+  // one-time move off the old 0.70 default: every visit saved it, so a pre-marker 0.7 wasn't a choice
+  const migrate = localStorage.getItem(INSIDE_DEFAULT_V2_KEY) !== '1';
+  localStorage.setItem(INSIDE_DEFAULT_V2_KEY, '1');
+  if (migrate && Math.abs(v - 0.7) < 1e-9) return DEFAULT_PARAMS.insideThreshold;
   return Number.isFinite(v) && v >= 0.3 && v <= 0.9 ? v : DEFAULT_PARAMS.insideThreshold;
 }
 /** Saved grip pattern for the next textured area: a built-in name or `lib:<id>` (default Diamond knurl). */
@@ -1805,6 +1811,7 @@ export default function App() {
               {showPill && (
                 <RunIndicator
                   label={loadingLabel}
+                  note={activeTool && mode === 'paint' ? 'Tools paused' : undefined}
                   fraction={running && !busyLabel ? fraction : null}
                   onCancel={running && !busyLabel ? onCancelRun : undefined}
                 />

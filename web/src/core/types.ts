@@ -221,7 +221,7 @@ export const DEFAULT_PARAMS: Params = {
   perPart: false,
   depth: null,
   paintInside: false,
-  insideThreshold: 0.7,
+  insideThreshold: 0.6,
   textures: [],
 };
 

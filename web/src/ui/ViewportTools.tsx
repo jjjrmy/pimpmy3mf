@@ -117,7 +117,12 @@ export function ViewportTools({
   const tip = (tool: ViewportTool, idle: string) => (activeTool === tool ? 'Click again or press Esc to exit' : idle);
   const matePending = !!mate && mate.step !== 'pickMoving';
   return (
-    <div className="viewport-tools" role="toolbar" aria-label="Paint tools">
+    <div
+      className={`viewport-tools${paused ? ' is-paused' : ''}`}
+      role="toolbar"
+      aria-label="Paint tools"
+      title={paused ? 'Updating: tools are paused until it finishes' : undefined}
+    >
       <button
         type="button"
         className={`vtool${activeTool === 'lay' ? ' is-active' : ''}`}
@@ -299,11 +304,6 @@ export function ViewportTools({
             <p className="hint mate-esc-hint">Esc to cancel · Done to finish</p>
           </div>
         </div>
-      )}
-      {paused && activeTool && (
-        <p className="vtool-paused" role="status">
-          Updating… tools are paused
-        </p>
       )}
       {hasOrientation && (
         <div className="vtool-sub">

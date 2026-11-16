@@ -8,9 +8,11 @@ interface RunIndicatorProps {
   fraction: number | null;
   /** Stops the run; omitted for loads that can't be cancelled (image decode, model load). */
   onCancel?: () => void;
+  /** Extra short status shown under the label, e.g. that the viewport tools are paused. */
+  note?: string;
 }
 
-export function RunIndicator({ label, fraction, onCancel }: RunIndicatorProps) {
+export function RunIndicator({ label, fraction, onCancel, note }: RunIndicatorProps) {
   const pct = fraction == null ? null : Math.round(Math.min(1, Math.max(0, fraction)) * 100);
   return (
     <div className="run-pill" role="status" aria-live="polite">
@@ -19,6 +21,7 @@ export function RunIndicator({ label, fraction, onCancel }: RunIndicatorProps) {
       </span>
       <span className="run-pill-body">
         <span className="run-pill-label">{label}</span>
+        {note && <span className="run-pill-note">{note}</span>}
         {pct != null && (
           <span className="run-pill-bar" aria-hidden>
             <span className="run-pill-fill" style={{ width: `${pct}%` }} />

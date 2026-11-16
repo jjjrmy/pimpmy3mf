@@ -21,7 +21,7 @@ const MAX_ERODE_TRIS = 20_000;
 /** Full depth: at least this much filament 1 lies under inside faces (mm); several wall loops' worth. */
 export const FULL_SKIN = 2;
 /** Default "what counts as inside" threshold (openness below it = inside). */
-export const DEFAULT_INSIDE_THRESHOLD = 0.7;
+export const DEFAULT_INSIDE_THRESHOLD = 0.6;
 
 /** Wall time of the last shell builds, for scripts. Reset by ShellCache.build on every cache miss. */
 export const shellStats = { ms: 0, parts: 0, erodeTris: [] as number[], insideMs: 0, skinMs: 0, erodeMs: 0 };
