@@ -252,7 +252,7 @@ export default function App() {
   const overLimitRef = useRef(false);
   /** Who set Per-part for this assembly: null = nobody yet, 'auto' = a second file turned it on, 'user' = the toggle. */
   const perPartChoiceRef = useRef<'auto' | 'user' | null>(null);
-  const prevFileCountRef = useRef(0);
+  const prevPerPartAvailRef = useRef<{ token: number; avail: boolean }>({ token: -1, avail: false });
   /** Bumped by Clear all so a save already reading files doesn't write the old session back. */
   const saveGenRef = useRef(0);
   const [asmBusy, setAsmBusy] = useState(false);
@@ -645,7 +645,7 @@ export default function App() {
     setModel({ name: n === 1 ? info.items[0].fileName : `Assembly · ${n} files`, triangles: info.triangles, objects: info.objects });
     if (fresh) {
       setHiddenParts(new Set());
-      patchParams({ perPart: false }); // opt-in per model (it comes on by itself when a second file is added)
+      patchParams({ perPart: false }); // comes back on by itself for a model with several parts (see below)
       perPartChoiceRef.current = null;
       setModelToken((t) => t + 1);
       setMovingItemId(null);
@@ -1446,18 +1446,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asmItems, asmSources, hiddenParts, params.paintedFaces, params.textures, params.orientation, params.perPart, image, selectedPresetId]);
 
-  // a second model file turns Per-part on (each part then keeps its camo when printed on its own), unless the
-  // user already chose for this assembly; a restore decides from its saved choice instead
+  // a model with several printable parts in one object (a multi-part 3MF, or an assembly of 2+ files) turns
+  // Per-part on, so each part keeps its camo when printed on its own; unless the user already chose for this
+  // model. A restore decides from its saved choice instead. (Single-part objects, even several of them, already
+  // get modifiers per object, so the toggle doesn't apply there.)
   useEffect(() => {
-    const n = asmItems.length;
-    const prev = prevFileCountRef.current;
-    prevFileCountRef.current = n;
-    if (restoringRef.current || prev >= 2 || n < 2 || perPartChoiceRef.current !== null) return;
+    // a fresh load (new model token) starts from "not available", so a multi-part model replacing another counts
+    const prev = prevPerPartAvailRef.current;
+    const was = prev.token === modelToken && prev.avail;
+    prevPerPartAvailRef.current = { token: modelToken, avail: perPartAvailable };
+    if (restoringRef.current || was || !perPartAvailable || perPartChoiceRef.current !== null) return;
     perPartChoiceRef.current = 'auto';
     patchParams({ perPart: true });
     toast({ kind: 'info', title: 'Per-part modifiers on', message: 'Each part keeps its camo when printed separately.' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asmItems.length]);
+  }, [perPartAvailable, modelToken]);
 
   const startFreshRef = useRef(onClearModel);
   startFreshRef.current = onClearModel;
@@ -1507,7 +1510,7 @@ export default function App() {
         if (state.perPartChoice) {
           perPartChoiceRef.current = state.perPartChoice;
           patchParams({ perPart: !!state.perPart });
-        } else if (state.items.length >= 2) {
+        } else if (info.objects.some((o) => o.parts.length > 1)) {
           perPartChoiceRef.current = 'auto';
           patchParams({ perPart: true });
           toast({ kind: 'info', title: 'Per-part modifiers on', message: 'Each part keeps its camo when printed separately.' });
