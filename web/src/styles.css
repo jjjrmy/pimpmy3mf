@@ -933,8 +933,8 @@ input[type='color'] {
   color: #ff8a7a;
   font-weight: var(--fw-x);
 }
-.viewport-status .status-busy {
-  color: var(--yellow-2);
+.viewport-status .status.is-stale {
+  opacity: 0.55;
 }
 .viewport-prisms {
   position: absolute;
@@ -1367,9 +1367,6 @@ input[type='color'] {
 }
 .status-dim {
   color: var(--text-dim);
-}
-.status-busy {
-  color: var(--yellow);
 }
 .status-error {
   color: var(--danger);

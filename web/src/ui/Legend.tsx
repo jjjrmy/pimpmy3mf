@@ -255,24 +255,21 @@ export function Legend(props: LegendProps) {
 }
 
 interface StatusLineProps {
-  running: boolean;
-  stage: string | null;
   error: string | null;
   result: Result | null;
+  /** A run is in flight: the corner pill is the only loading indicator, so this just dims the last result. */
+  stale?: boolean;
 }
 
-export function StatusLine({ running, stage, error, result }: StatusLineProps) {
+export function StatusLine({ error, result, stale = false }: StatusLineProps) {
   if (error) return <div className="status status-error">
         <Icon name="warning" /> {error}
       </div>;
-  if (running) return <div className="status status-busy">
-        <Icon name="busy" /> {stage ?? 'Working…'}
-      </div>;
-  if (!result) return <div className="status">Ready.</div>;
+  if (!result) return stale ? null : <div className="status">Ready.</div>;
   const { stats, tile } = result;
   // result.warnings surface as toasts now, not inline here
   return (
-    <div className="status">
+    <div className={`status${stale ? ' is-stale' : ''}`}>
       <span>
         {result.regions.length} colors · {tile.w.toFixed(1)} × {tile.h.toFixed(1)} mm
         {result.mode === 'paint' ? (tile.repeat ? ' (tiled)' : ' (stretched)') : ''}

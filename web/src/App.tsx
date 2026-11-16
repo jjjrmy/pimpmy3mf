@@ -982,9 +982,11 @@ export default function App() {
                 </div>
               )}
 
-              <div className="viewport-status">
-                <StatusLine running={running} stage={stage ? friendlyStage(stage) : null} error={error} result={result} />
-              </div>
+              {(!!error || !!result || !busy) && (
+                <div className="viewport-status">
+                  <StatusLine error={error} result={result} stale={busy && !error} />
+                </div>
+              )}
 
               {showPill && (
                 <RunIndicator
