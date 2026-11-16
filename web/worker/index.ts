@@ -31,7 +31,7 @@ const CACHE_VERSION = 'v1';
 const MANIFEST_TTL = 5 * 60;
 const IMAGE_TTL = 7 * 24 * 60 * 60;
 /** Bump when the preset set is replaced, so edge-cached manifests/images from the old set are bypassed at once. */
-const PRESETS_CACHE_VERSION = 'mw2-1';
+const PRESETS_CACHE_VERSION = 'mw2-2';
 
 function json(body: unknown, status: number, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {

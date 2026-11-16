@@ -12,6 +12,8 @@ export interface PresetItem {
   source: string;
   w?: number;
   h?: number;
+  /** How many real colors the camo has; picking it in Auto palette mode sets the color count. */
+  colors?: number;
 }
 
 export interface PresetManifest {

@@ -198,14 +198,15 @@ export function PaintTab(props: PaintTabProps) {
           {props.presets?.items.map((it) => {
             const selected = props.selectedPresetId === it.id;
             const busy = props.presetBusy === it.id;
+            const label = it.colors ? `${it.name} · ${it.colors} colors` : it.name;
             return (
               <li key={it.id} className="swatch-cell">
                 <button
                   type="button"
                   className={`swatch${selected ? ' is-selected' : ''}${busy ? ' is-busy' : ''}`}
-                  aria-label={it.name}
+                  aria-label={label}
                   aria-pressed={selected}
-                  title={it.name}
+                  title={label}
                   onClick={() => props.onPreset(it)}
                 >
                   <img src={`/presets/${it.file}`} alt="" loading="lazy" decoding="async" width={96} height={96} />

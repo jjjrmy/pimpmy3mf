@@ -22,6 +22,19 @@ MAX_DIM = 512
 QUALITY = 85
 SOURCE_SITE = "https://callofduty.fandom.com"
 
+# Real camo colors per preset (k-means in Lab + a visual check; shading/anti-aliasing and colors under ~3% don't
+# count). Picking a preset in Auto palette mode sets the color count to this. Ids missing here get no "colors".
+COLOR_COUNTS = {
+    "arctic": 3,
+    "blue-tiger": 2,
+    "desert": 3,
+    "digital": 3,
+    "fall": 4,
+    "red-tiger": 2,
+    "urban": 4,
+    "woodland": 4,
+}
+
 
 def ext_for(mime):
     return {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(mime, "bin")
@@ -47,7 +60,7 @@ def main():
             im.save(out, "WEBP", quality=QUALITY, method=6)
             ow, oh = im.size
 
-        items.append({
+        item = {
             "id": it["id"],
             "name": it["name"],
             "games": it["games"],
@@ -55,7 +68,10 @@ def main():
             "source": it["source"],
             "w": ow,
             "h": oh,
-        })
+        }
+        if it["id"] in COLOR_COUNTS:
+            item["colors"] = COLOR_COUNTS[it["id"]]
+        items.append(item)
 
     items.sort(key=lambda r: r["name"].lower())
 

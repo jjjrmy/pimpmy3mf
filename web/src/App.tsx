@@ -603,6 +603,10 @@ export default function App() {
     setPresetBusy(item.id);
     setSelectedPresetId(item.id);
     setBusyLabel('Loading camo…');
+    // the camo's own color count; a Custom palette is the user's and stays as it is
+    if (paletteMode === 'auto' && item.colors && item.colors >= 1 && item.colors <= 12 && item.colors !== params.colors) {
+      patchParams({ colors: item.colors });
+    }
     try {
       const res = await fetch(`/presets/${item.file}`);
       if (!res.ok) throw new Error(`Couldn't load the "${item.name}" preset (${res.status}).`);
