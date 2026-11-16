@@ -179,6 +179,39 @@ export function orientModel(model: Model, R: number[] | null): Model {
 }
 
 /**
+ * The rigid motion orientModelLike(·, ref, R) applies, as x' = R·x + t (the same bbox centre and drop, in float64).
+ * null when R is null.
+ */
+export function orientPlacement(ref: Model, R: number[] | null): { R: number[]; t: Vec3 } | null {
+  if (!R) return null;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  for (const o of ref.objects) for (const p of o.parts) {
+    const v = p.mesh.vertices;
+    for (let i = 0; i < v.length; i += 3) {
+      if (v[i] < x0) x0 = v[i]; if (v[i] > x1) x1 = v[i];
+      if (v[i + 1] < y0) y0 = v[i + 1]; if (v[i + 1] > y1) y1 = v[i + 1];
+      if (v[i + 2] < z0) z0 = v[i + 2]; if (v[i + 2] > z1) z1 = v[i + 2];
+    }
+  }
+  if (!(x0 <= x1)) return null;
+  const c: Vec3 = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];
+  let nx0 = Infinity, ny0 = Infinity, nz0 = Infinity, nx1 = -Infinity, ny1 = -Infinity;
+  for (const o of ref.objects) for (const p of o.parts) {
+    const v = p.mesh.vertices;
+    for (let i = 0; i < v.length; i += 3) {
+      const dx = v[i] - c[0], dy = v[i + 1] - c[1], dz = v[i + 2] - c[2];
+      const X = R[0] * dx + R[1] * dy + R[2] * dz, Y = R[3] * dx + R[4] * dy + R[5] * dz, Z = R[6] * dx + R[7] * dy + R[8] * dz;
+      if (X < nx0) nx0 = X; if (X > nx1) nx1 = X;
+      if (Y < ny0) ny0 = Y; if (Y > ny1) ny1 = Y;
+      if (Z < nz0) nz0 = Z;
+    }
+  }
+  const d: Vec3 = [c[0] - (nx0 + nx1) / 2, c[1] - (ny0 + ny1) / 2, -nz0];
+  const Rc = applyMat3(R, c);
+  return { R: R.slice(), t: [d[0] - Rc[0], d[1] - Rc[1], d[2] - Rc[2]] };
+}
+
+/**
  * Like orientModel, but the placement (rotation centre, XY centre, drop to z = 0) is computed from `ref` and the
  * same rigid transform is applied to `model`. Used to orient the as-loaded model exactly like its textured version
  * (whose raised relief is what touches the bed), so both stay in the same coordinates. ref === model is orientModel.

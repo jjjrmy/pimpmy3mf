@@ -3,7 +3,7 @@
 // thickness change only re-extrudes.
 import type {
   Pipeline, RasterImage, Mesh, Model, ModelObject, ModelPart, Params, Result, ColorRegion, Axis, RGB, RunOptions, FaceSkin,
-  Projection, CylinderFrame,
+  Projection, CylinderFrame, Vec3,
 } from './types';
 import { DEFAULT_PARAMS } from './types';
 import { initManifold } from './manifold';
@@ -12,7 +12,7 @@ import { resample, despeckle, type Affine } from './raster';
 import { trace } from './trace';
 import { extrudeRegion, type CropBox } from './extrude';
 import { cylFrame, extrudeRegionsCyl } from './cylindrical';
-import { orientModelLike } from './faces';
+import { orientModelLike, orientPlacement } from './faces';
 import { buildFaceSkins, subtractSkins, type SkinExtent } from './skins';
 import { applyTextures, textureKey } from './texture';
 import type { FaceTexture } from './types';
@@ -167,6 +167,7 @@ export function createPipeline(): Pipeline {
   let tIn: Model | null = null; let tKey = ''; let tSrc: Model | null = null;
   let tChanged: boolean[][] | null = null; let tApplied: FaceTexture[] = []; let tWarn: string[] = [];
   let oSrc: Model | null = null; let oKey = ''; let oModel: Model | null = null; let oOrig: Model | null = null;
+  let oPlace: { R: number[]; t: Vec3 } | null = null;
   let sKey = ''; let sRegions: ColorRegion[] | null = null; let sSkins: FaceSkin[] = [];
   // depth stage (between 3 and 4): shell-clipped modifiers (paint) / base + caps (image)
   const shellCache = new ShellCache();
@@ -203,6 +204,7 @@ export function createPipeline(): Pipeline {
     if (tSrc !== oSrc || orientKey !== oKey) {
       oModel = tSrc ? orientModelLike(tSrc, tSrc, params.orientation) : null;
       oOrig = srcModel && tSrc && tSrc !== srcModel ? orientModelLike(srcModel, tSrc, params.orientation) : oModel;
+      oPlace = tSrc ? orientPlacement(tSrc, params.orientation) : null;
       oSrc = tSrc; oKey = orientKey;
     }
     const model = oModel; // textured shape (geometry)
@@ -386,6 +388,7 @@ export function createPipeline(): Pipeline {
       projection: geom.mode === 'paint' ? params.projection : 'planar',
       cylinder: g.cyl,
       orientation: geom.mode === 'paint' ? params.orientation : null,
+      orientPlace: geom.mode === 'paint' && oPlace ? { R: oPlace.R.slice(), t: [...oPlace.t] as Vec3 } : null,
       model: geom.mode === 'paint' ? origModel : null,
       faceSkins: sSkins.map((k) => ({ ...k, mesh: cloneMesh(k.mesh)! })),
       depth,

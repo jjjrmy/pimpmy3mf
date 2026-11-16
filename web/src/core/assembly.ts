@@ -272,6 +272,8 @@ export interface FaceMateInput {
   flip: boolean;
   /** Spin about the target normal, degrees. */
   angle: number;
+  /** In-plane slide along the target face's planeBasis(normal) [u, v], mm (mate gizmo arrows). */
+  slide?: [number, number];
   /**
    * First placement: centroid on centroid and the long in-plane directions lined up (BuildBench seatStart). Without
    * it the moving face only drops onto the target plane, keeping its in-plane position.
@@ -305,7 +307,131 @@ export function solveFaceMate(i: FaceMateInput): Rigid | null {
     const rel = sub(i.movingCentroid, i.targetCentroid);
     point = sub(i.movingCentroid, scale(tN, dot(tN, rel) - i.offset));
   }
+  if (i.slide && (i.slide[0] || i.slide[1])) {
+    const [u, w] = planeBasis(tN);
+    point = add(point, add(scale(u, i.slide[0]), scale(w, i.slide[1])));
+  }
   // the spin turns about the moving face's final centroid, so it stays put
   R = mulMat3(axisAngle(tN, (i.angle * Math.PI) / 180), R);
   return { R, t: sub(point, rotate(R, i.movingCentroid)) };
+}
+
+// ---- gizmo math (ported from BuildBench gizmoMath.ts) ----------------------------------------
+
+/** Two unit vectors spanning the plane perpendicular to `n` (right-handed: u × v = n). */
+export function planeBasis(n: Vec3): [Vec3, Vec3] {
+  const nn = normalize(n) ?? [0, 0, 1];
+  const helper: Vec3 = Math.abs(nn[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const u = normalize(cross(helper, nn))!;
+  return [u, cross(nn, u)];
+}
+
+/** Where a ray meets the plane through `centre` with `normal`, or null (parallel / behind). */
+export function rayPlanePoint(centre: Vec3, normal: Vec3, rayO: Vec3, rayD: Vec3): Vec3 | null {
+  const denom = dot(normal, rayD);
+  if (Math.abs(denom) < 1e-6) return null;
+  const t = dot(normal, sub(centre, rayO)) / denom;
+  return t < 0 ? null : add(rayO, scale(rayD, t));
+}
+
+/** Angle (radians, right-handed about `axis`) of where the ray meets the plane through `centre`. */
+export function rayAngleAbout(centre: Vec3, axis: Vec3, rayO: Vec3, rayD: Vec3): number | null {
+  const p = rayPlanePoint(centre, axis, rayO, rayD);
+  if (!p) return null;
+  const [u, v] = planeBasis(axis);
+  const d = sub(p, centre);
+  return Math.atan2(dot(d, v), dot(d, u));
+}
+
+/** Parameter along the line (origin + t·dir) of its closest point to the ray. */
+export function rayLineParam(lineO: Vec3, lineD: Vec3, rayO: Vec3, rayD: Vec3): number | null {
+  const d1 = normalize(lineD), d2 = normalize(rayD);
+  if (!d1 || !d2) return null;
+  const r = sub(lineO, rayO);
+  const b = dot(d1, d2);
+  const denom = 1 - b * b;
+  if (denom < 1e-6) return null;
+  return (b * dot(d2, r) - dot(d1, r)) / denom;
+}
+
+/** Shortest signed angle difference, radians. */
+export function angleDelta(from: number, to: number): number {
+  let d = to - from;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+/** Gizmo snapping: translate 1 mm, rotate 15°; `free` (Shift held) keeps the raw value. */
+export function snapGizmo(kind: 'translate' | 'rotate', value: number, free: boolean): number {
+  if (free) return value;
+  const step = kind === 'translate' ? 1 : 15;
+  return Math.round(value / step) * step;
+}
+
+/** Rigid motion: translate `mm` along unit `axis`. */
+export function translateRigid(axis: Vec3, mm: number): Rigid {
+  return { R: IDENTITY3.slice(), t: scale(axis, mm) };
+}
+
+/** Rigid motion: rotate `deg` about unit `axis` through `centre`. */
+export function rotateAboutRigid(axis: Vec3, centre: Vec3, deg: number): Rigid {
+  const R = axisAngle(normalize(axis) ?? [0, 0, 1], (deg * Math.PI) / 180);
+  return { R, t: sub(centre, rotate(R, centre)) };
+}
+
+/** a ∘ m ∘ a⁻¹: a motion `m` expressed in frame `a`'s target space (e.g. assembly -> displayed). */
+export function conjugateRigid(a: Rigid, m: Rigid): Rigid {
+  return composeRigid(a, composeRigid(m, invertRigid(a)));
+}
+
+export function isIdentityRigid(m: Rigid, eps = 1e-9): boolean {
+  return m.t.every((x) => Math.abs(x) <= eps) && m.R.every((x, i) => Math.abs(x - IDENTITY3[i]) <= eps);
+}
+
+/** Rotate a direction (no translation). */
+export function rotateVec(m: Rigid, v: Vec3): Vec3 {
+  return rotate(m.R, v);
+}
+
+// ---- export naming ---------------------------------------------------------------------------
+
+/** A file name without its folder and extension, made safe for a download name. */
+export function safeStem(name: string): string {
+  const base = name.replace(/\.[^./\\]+$/, '').replace(/^.*[\\/]/, '');
+  return (base || 'file').replace(/[^\w.-]+/g, '_');
+}
+
+/**
+ * The export stem of the loaded files: the file's own stem for one, `first+second` for two, `first+second+N` when
+ * N more follow. Capped to `max` chars (the stems shrink, the "+N" count stays).
+ */
+export function assemblyStem(fileNames: string[], max = 60): string {
+  if (!fileNames.length) return 'model';
+  const stems = fileNames.slice(0, 2).map(safeStem);
+  const more = fileNames.length > 2 ? `+${fileNames.length - 2}` : '';
+  if (stems.length === 1) return stems[0].slice(0, max) || 'model';
+  const room = Math.max(2, max - more.length - 1);
+  let [a, b] = stems;
+  while (a.length + b.length > room) {
+    if (a.length >= b.length) a = a.slice(0, -1);
+    else b = b.slice(0, -1);
+  }
+  return `${a}+${b}${more}`;
+}
+
+export type ExportFileKind = 'stl-zip' | 'plain-3mf' | 'bambu-3mf' | 'preview-png';
+
+/** Download name for an export: `<base>-<n>colors` plus the kind's suffix (base = "<model stem>-<image stem>"). */
+export function exportFilename(kind: ExportFileKind, base: string, n: number): string {
+  switch (kind) {
+    case 'stl-zip':
+      return `${base}-${n}colors-stls.zip`;
+    case 'plain-3mf':
+      return `${base}-${n}colors-plain.3mf`;
+    case 'bambu-3mf':
+      return `${base}-${n}colors.3mf`;
+    case 'preview-png':
+      return `${base}-${n}colors-preview.png`;
+  }
 }

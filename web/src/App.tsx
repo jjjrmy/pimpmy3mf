@@ -1,11 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { FaceTexture, Mesh, Params, Result, RGB } from './core/types';
+import type { FaceTexture, Mesh, PaintedFace, Params, Result, RGB, Vec3 } from './core/types';
 import { DEFAULT_PARAMS } from './core/types';
 import { IDENTITY3, mulMat3, rotationToDown } from './core/faces';
-import { composeRigid, faceFeature, solveFaceMate, type Rigid } from './core/assembly';
+import {
+  IDENTITY_RIGID,
+  applyRigid,
+  composeRigid,
+  conjugateRigid,
+  faceFeature,
+  invertRigid,
+  isIdentityRigid,
+  planeBasis,
+  rotateAboutRigid,
+  rotateVec,
+  solveFaceMate,
+  translateRigid,
+  type Rigid,
+} from './core/assembly';
 import { PRINTERS } from './core/threemf';
 import { CancelledError, PipelineClient } from './worker/client';
-import type { ExportKind, ModelInfo } from './worker/messages';
+import type { ExportKind, ModelInfo, RunLayout } from './worker/messages';
 import type { ModelSummary } from './ui/DesignTab';
 import { TabStrip, type TabId } from './ui/TabStrip';
 import { PaintTab, type AssemblyFileRow } from './ui/PaintTab';
@@ -16,7 +30,8 @@ import { ActionBar } from './ui/ActionBar';
 import { DropOverlay } from './ui/DropOverlay';
 import { ViewportLoading } from './ui/ViewportLoading';
 import { RunIndicator } from './ui/RunIndicator';
-import { Viewer3D, type FacePick, type MateFace, type PartMotion } from './ui/Viewer3D';
+import { Viewer3D, type FacePick, type GizmoEvent, type GizmoSpec, type MateFace, type PartMotion } from './ui/Viewer3D';
+import { SAVE_LIMIT_BYTES, clearSession, loadSession, saveSession, storedFileIds, type SavedState } from './ui/sessionStore';
 import { ViewportTools, type MatePanel, type ViewportTool } from './ui/ViewportTools';
 import {
   DEFAULT_PATTERN_KEY,
@@ -120,8 +135,17 @@ function faceId(): string {
 }
 
 type AsmItem = ModelInfo['items'][number];
-/** One placement snapshot (assemble undo): the files in the assembly and where each sat. */
-type AsmSnapshot = { itemId: string; fileName: string; transform: Rigid }[];
+/** Where a painted face / texture sat (file + its own object / part), to bring it back with an undone remove. */
+type PartRef = { itemId: string; object: number; part: number };
+/**
+ * One assemble undo step: the files in list order and where each sat; for a remove, also the removed file's
+ * painted faces and textures (keyed by their file part, so they land on the right indices again).
+ */
+interface AsmSnapshot {
+  items: { itemId: string; fileName: string; transform: Rigid }[];
+  faces?: { ref: PartRef; face: PaintedFace }[];
+  textures?: { ref: PartRef; texture: FaceTexture }[];
+}
 /** A face chosen in the assemble flow (triangle indices of one part, pose-independent). */
 interface MateFaceRef {
   objectIndex: number;
@@ -136,15 +160,14 @@ interface MateState {
   offset: number;
   flip: boolean;
   angle: number;
+  /** In-plane slide on the target face (mate gizmo arrows), mm. */
+  slide: [number, number];
 }
-const MATE_START: MateState = { step: 'pickMoving', moving: null, target: null, offset: 0, flip: false, angle: 0 };
+const MATE_START: MateState = { step: 'pickMoving', moving: null, target: null, offset: 0, flip: false, angle: 0, slide: [0, 0] };
+const wrapDeg = (a: number) => ((((a + 180) % 360) + 360) % 360) - 180;
 const MOVING_COLOR = '#ff8a1f';
 const TARGET_COLOR = '#36d6ff';
 
-/** Identity of the current layout (files + placements), to tell whether a result shows it. */
-function layoutKey(items: AsmItem[]): string {
-  return items.map((it) => `${it.itemId}:${it.transform.R.join(',')}:${it.transform.t.join(',')}`).join('|');
-}
 
 interface ImageState {
   blob: Blob;
@@ -208,10 +231,18 @@ export default function App() {
   const [movingItemId, setMovingItemId] = useState<string | null>(null);
   const [mate, setMate] = useState<MateState | null>(null);
   const [asmHistory, setAsmHistory] = useState<AsmSnapshot[]>([]);
-  /** Layout the displayed result was computed for (picks wait until it matches the current one). */
-  const [resultLayout, setResultLayout] = useState('');
-  /** An applied mate, still shown as a preview until the re-run result arrives (no jump back meanwhile). */
-  const [pendingMotion, setPendingMotion] = useState<(PartMotion & { layout: string }) | null>(null);
+  /** The assembly layout the displayed result was computed for (the view corrects for later moves). */
+  const [resultRun, setResultRun] = useState<{ layout: RunLayout } | null>(null);
+  /** A gizmo drag in progress (or an applied move still on its way): displayed motion of one file. */
+  const [liveDrag, setLiveDrag] = useState<{ itemId: string; G: Rigid } | null>(null);
+  const gizmoDragCentre = useRef<Vec3 | null>(null);
+  const mateDragBase = useRef<{ angle: number; slide: [number, number] } | null>(null);
+  // auto-save: item ids whose bytes are stored (null = not read yet), restore in progress, size warning shown
+  const savedIdsRef = useRef<Set<string> | null>(null);
+  const restoringRef = useRef(false);
+  const overLimitRef = useRef(false);
+  /** Bumped by Clear all so a save already reading files doesn't write the old session back. */
+  const saveGenRef = useRef(0);
   const [asmBusy, setAsmBusy] = useState(false);
 
   const [tab, setTab] = useState<TabId>('paint');
@@ -321,7 +352,11 @@ export default function App() {
   const onLayPick = (pick: FacePick) => {
     const res = result;
     if (!res) return;
-    const newO = mulMat3(rotationToDown(pick.normal), res.orientation ?? IDENTITY3);
+    // a file moved since this result was computed shows (and is picked) through its correction
+    const src = resultRun?.layout.sources[pick.objectIndex]?.[pick.partIndex];
+    const corr = src ? corrections.get(src.itemId) : undefined;
+    const normal = corr ? rotateVec(corr, pick.normal) : pick.normal;
+    const newO = mulMat3(rotationToDown(normal), res.orientation ?? IDENTITY3);
     setOrientHistory((h) => [...h, params.orientation]);
     patchParams({ orientation: newO });
     setActiveTool(null); // exiting the tool after a successful lay is fine
@@ -468,15 +503,9 @@ export default function App() {
   const onToolChange = (tool: ViewportTool | null) => {
     setActiveTool(tool);
     if (tool === 'texture') setTab('texture');
-    if (tool === 'assemble') {
-      setMate({ ...MATE_START });
-      // mates are solved in assembly space: drop the lay-on-face pose (re-apply it once assembled)
-      if (params.orientation) {
-        setOrientHistory([]);
-        patchParams({ orientation: null });
-        toast({ kind: 'info', title: 'Lay on face was reset for assembling', message: 'Lay it on a face again when the parts are mated.' });
-      }
-    } else setMate(null);
+    // mates are solved in assembly space even while the assembly is laid on a face (picks are mapped back)
+    if (tool === 'assemble') setMate({ ...MATE_START });
+    else setMate(null);
   };
 
   const onRemoveFace = (id: string) => patchParams({ paintedFaces: params.paintedFaces.filter((f) => f.id !== id) });
@@ -594,7 +623,7 @@ export default function App() {
       setModelToken((t) => t + 1);
       setMovingItemId(null);
       setMate(null);
-      setPendingMotion(null);
+      setLiveDrag(null);
       onModeChange('paint');
     } else if (changed) {
       const where = new Map<string, [number, number]>();
@@ -630,8 +659,9 @@ export default function App() {
     if (changed) setGeomToken((t) => t + 1);
   };
 
-  const snapshot = (): AsmSnapshot =>
-    asmItemsRef.current.map((it) => ({ itemId: it.itemId, fileName: it.fileName, transform: { R: it.transform.R.slice(), t: [...it.transform.t] as Rigid['t'] } }));
+  const snapshot = (): AsmSnapshot => ({
+    items: asmItemsRef.current.map((it) => ({ itemId: it.itemId, fileName: it.fileName, transform: { R: it.transform.R.slice(), t: [...it.transform.t] as Rigid['t'] } })),
+  });
 
   /** Model files: added beside the current assembly, or (none loaded / `replace`) loaded fresh. */
   const loadModels = async (files: File[], replace: boolean) => {
@@ -687,20 +717,39 @@ export default function App() {
     setAsmHistory([]);
     setMovingItemId(null);
     setMate(null);
-    setPendingMotion(null);
+    setLiveDrag(null);
+    setResultRun(null);
     if (mode === 'paint') setResult(null);
     onModeChange('image');
+    savedIdsRef.current = new Set();
+    saveGenRef.current++;
+    clearSession().catch(() => {});
   };
 
   /** Remove one file from the assembly (its painted faces / textures go with it; later parts shift down). */
   const onRemoveFile = async (itemId: string) => {
     if (asmItemsRef.current.length <= 1) return onClearModel();
-    const before = snapshot();
+    // the removed file's painted faces / textures come back with an undo
+    const refOf = (j: number, k: number): PartRef | null => {
+      const src = sourcesRef.current[j]?.[k];
+      return src && src.itemId === itemId ? { itemId, object: src.object, part: src.part } : null;
+    };
+    const before: AsmSnapshot = {
+      ...snapshot(),
+      faces: params.paintedFaces.flatMap((face) => {
+        const ref = refOf(face.objectIndex, face.partIndex);
+        return ref ? [{ ref, face }] : [];
+      }),
+      textures: params.textures.flatMap((texture) => {
+        const ref = refOf(texture.objectIndex, texture.partIndex);
+        return ref ? [{ ref, texture }] : [];
+      }),
+    };
     setAsmBusy(true);
     try {
       const info = await clientRef.current!.removeModelFile(itemId);
       setAsmHistory((h) => [...h, before]);
-      filesRef.current.delete(itemId);
+      // the File stays in filesRef: undo re-adds it from there
       applyInfo(info, false);
       if (info.items.length < 2 && activeTool === 'assemble') setActiveTool(null);
     } catch (err) {
@@ -717,25 +766,53 @@ export default function App() {
     const client = clientRef.current!;
     setAsmHistory((h) => h.slice(0, -1));
     setMate((m) => (m ? { ...MATE_START } : m));
-    setPendingMotion(null);
+    setLiveDrag(null);
     setAsmBusy(true);
     try {
       let info: ModelInfo | null = null;
       for (const it of asmItemsRef.current) {
-        if (!snap.some((s) => s.itemId === it.itemId)) {
+        if (!snap.items.some((s) => s.itemId === it.itemId)) {
           info = await client.removeModelFile(it.itemId);
           applyInfo(info, false);
         }
       }
-      for (const it of snap) {
+      // a removed file goes back to its old list position (the kept files are a subsequence of the snapshot)
+      for (let index = 0; index < snap.items.length; index++) {
+        const it = snap.items[index];
         if (asmItemsRef.current.some((c) => c.itemId === it.itemId)) continue;
         const file = filesRef.current.get(it.itemId);
         if (!file) continue;
-        info = await client.addModelFile(it.itemId, await file.arrayBuffer(), it.fileName);
+        info = await client.addModelFile(it.itemId, await file.arrayBuffer(), it.fileName, { index, transform: { R: it.transform.R, t: it.transform.t } });
         applyInfo(info, false);
       }
-      info = await client.setPlacements(snap.map((it) => ({ itemId: it.itemId, R: it.transform.R, t: it.transform.t })));
+      info = await client.setPlacements(snap.items.map((it) => ({ itemId: it.itemId, R: it.transform.R, t: it.transform.t })));
       applyInfo(info, false);
+      if (snap.faces?.length || snap.textures?.length) {
+        const where = new Map<string, [number, number]>();
+        info.sources.forEach((row, j) => row.forEach((src, k) => where.set(`${src.itemId}:${src.object}:${src.part}`, [j, k])));
+        const at = (r: PartRef) => where.get(`${r.itemId}:${r.object}:${r.part}`);
+        setParams((p) => {
+          const faceIds = new Set(p.paintedFaces.map((f) => f.id));
+          const texIds = new Set(p.textures.map((t) => t.id));
+          return {
+            ...p,
+            paintedFaces: [
+              ...p.paintedFaces,
+              ...(snap.faces ?? []).flatMap(({ ref, face }) => {
+                const jk = at(ref);
+                return jk && !faceIds.has(face.id) ? [{ ...face, objectIndex: jk[0], partIndex: jk[1] }] : [];
+              }),
+            ],
+            textures: [
+              ...p.textures,
+              ...(snap.textures ?? []).flatMap(({ ref, texture }) => {
+                const jk = at(ref);
+                return jk && !texIds.has(texture.id) ? [{ ...texture, objectIndex: jk[0], partIndex: jk[1] }] : [];
+              }),
+            ],
+          };
+        });
+      }
     } catch (err) {
       toast({ kind: 'error', title: "Couldn't undo", message: (err as Error).message });
     } finally {
@@ -854,7 +931,6 @@ export default function App() {
     const handle = window.setTimeout(() => {
       runTimerRef.current = 0;
       const runParams: Params = { ...params, palette: paletteMode === 'custom' ? customPalette : null };
-      const layout = layoutKey(asmItemsRef.current);
       setRunning(true);
       setError(null);
       setFraction(null);
@@ -863,9 +939,9 @@ export default function App() {
           setStage(s);
           setFraction(f ?? null);
         })
-        .then((res) => {
+        .then(({ result: res, layout }) => {
           setResult(res);
-          setResultLayout(layout);
+          setResultRun({ layout });
           setRunning(false);
           setStage(null);
           setFraction(null);
@@ -995,19 +1071,54 @@ export default function App() {
   const hasResult = !!result && result.regions.length > 0;
   const perPartAvailable = !!model?.objects.some((o) => o.parts.length > 1);
 
-  // ---- assemble tool: pick moving face -> pick target face -> preview (flip / offset / angle) -> Apply ------
-  const layout = useMemo(() => layoutKey(asmItems), [asmItems]);
-  /** The view doesn't show the current layout yet (a run is pending): picks wait, the panel says so. */
-  const asmUpdating = asmBusy || running || resultLayout !== layout || !!result?.orientation;
+  // ---- assemble tool: pick moving face -> pick target face -> preview (flip / offset / angle / slide) -> Apply ----
+  // The displayed result may lag the layout (a run in flight or cancelled) and may be laid on a face. Picks are read
+  // off result.model and mapped into CURRENT assembly space through the result's own layout and lay-on-face pose;
+  // previews map back the other way. Item transforms always stay in assembly (unoriented) space.
+  /** The view is catching up with an assembly request: picks wait, the panel says so. */
+  const asmUpdating = asmBusy;
+  const resultPlace: Rigid = result?.orientPlace ? { R: result.orientPlace.R, t: result.orientPlace.t } : IDENTITY_RIGID;
+  const resultSources = resultRun?.layout.sources ?? [];
+  /** Per item in the displayed result: result.model coordinates -> current assembly space. */
+  const toAssembly = useMemo(() => {
+    const out = new Map<string, Rigid>();
+    if (!resultRun) return out;
+    const O = result?.orientPlace ? { R: result.orientPlace.R, t: result.orientPlace.t } : IDENTITY_RIGID;
+    const invO = invertRigid(O);
+    for (const p of resultRun.layout.items) {
+      const cur = asmItems.find((it) => it.itemId === p.itemId);
+      if (!cur) continue;
+      const Tcur: Rigid = { R: cur.transform.R, t: cur.transform.t as Rigid['t'] };
+      out.set(p.itemId, composeRigid(Tcur, composeRigid(invertRigid({ R: p.R, t: p.t }), invO)));
+    }
+    return out;
+  }, [resultRun, asmItems, result]);
+  /** Per item: displayed result -> where the current layout puts it (identity once the view has caught up). */
+  const corrections = useMemo(() => {
+    const out = new Map<string, Rigid>();
+    for (const [id, A] of toAssembly) out.set(id, composeRigid(resultPlace, A));
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toAssembly, result]);
+  /** Parts (`${j}:${k}`) of one file in the DISPLAYED result. */
+  const resultKeysOf = (itemId: string): string[] =>
+    resultSources.flatMap((row, j) => row.flatMap((src, k) => (src.itemId === itemId ? [`${j}:${k}`] : [])));
 
-  /** The mate preview's rigid motion for the moving file, in assembly space (= result.model while assembling). */
+  /** A picked face, mapped into current assembly space. */
+  const faceInAssembly = (f: MateFaceRef) => {
+    const mesh = result?.model?.objects[f.objectIndex]?.parts[f.partIndex]?.mesh;
+    const A = toAssembly.get(f.itemId);
+    if (!mesh || !A) return null;
+    const ff = faceFeature(mesh, f.triangles);
+    if (!ff) return null;
+    return { normal: rotateVec(A, ff.normal), centroid: applyRigid(A, ff.centroid), points: ff.points.map((p) => applyRigid(A, p)) };
+  };
+
+  /** The mate preview's rigid motion for the moving file, in assembly space. */
   const matePreview = useMemo<Rigid | null>(() => {
-    if (!mate?.moving || !mate.target || !result?.model) return null;
-    const mMesh = result.model.objects[mate.moving.objectIndex]?.parts[mate.moving.partIndex]?.mesh;
-    const tMesh = result.model.objects[mate.target.objectIndex]?.parts[mate.target.partIndex]?.mesh;
-    if (!mMesh || !tMesh) return null;
-    const mf = faceFeature(mMesh, mate.moving.triangles);
-    const tf = faceFeature(tMesh, mate.target.triangles);
+    if (!mate?.moving || !mate.target) return null;
+    const mf = faceInAssembly(mate.moving);
+    const tf = faceInAssembly(mate.target);
     if (!mf || !tf) return null;
     return solveFaceMate({
       movingNormal: mf.normal,
@@ -1019,14 +1130,23 @@ export default function App() {
       offset: mate.offset,
       flip: mate.flip,
       angle: mate.angle,
+      slide: mate.slide,
       seat: true,
     });
-  }, [mate, result]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mate, result, toAssembly]);
+
+  // a result with a different part structure invalidates face picks made on the old one
+  const resultSourcesKey = JSON.stringify(resultSources);
+  useEffect(() => {
+    setMate((m) => (m && (m.moving || m.target) ? { ...MATE_START } : m));
+  }, [resultSourcesKey]);
 
   const onAssemblePick = (pick: FacePick) => {
     if (asmUpdating || asmItems.length < 2) return;
-    const src = asmSources[pick.objectIndex]?.[pick.partIndex];
-    if (!src) return;
+    const src = resultSources[pick.objectIndex]?.[pick.partIndex];
+    // a part of a file removed since this result was computed
+    if (!src || !toAssembly.has(src.itemId)) return;
     const face: MateFaceRef = { objectIndex: pick.objectIndex, partIndex: pick.partIndex, triangles: pick.triangles, itemId: src.itemId };
     const cur = mate ?? MATE_START;
     if (!cur.moving || cur.step === 'pickMoving' || src.itemId === cur.moving.itemId) {
@@ -1035,7 +1155,24 @@ export default function App() {
       setMate({ ...MATE_START, step: 'pickTarget', moving: face });
       return;
     }
-    setMate({ ...cur, step: 'preview', target: face, offset: 0, flip: false, angle: 0 });
+    // re-picking only the target keeps the gap; the spin / flip / slide start over for the new face
+    setMate({ ...cur, step: 'preview', target: face, offset: cur.step === 'preview' ? cur.offset : 0, flip: false, angle: 0, slide: [0, 0] });
+  };
+
+  /** Commit a new placement for one file (one undo step); the display keeps it until the re-run lands. */
+  const commitPlacement = async (itemId: string, next: Rigid, failTitle: string) => {
+    const before = snapshot();
+    setAsmBusy(true);
+    try {
+      const info = await clientRef.current!.setPlacements([{ itemId, R: next.R, t: next.t }]);
+      setAsmHistory((h) => [...h, before]);
+      applyInfo(info, false);
+    } catch (err) {
+      toast({ kind: 'error', title: failTitle, message: (err as Error).message });
+    } finally {
+      setAsmBusy(false);
+      setLiveDrag(null);
+    }
   };
 
   const onMateApply = async () => {
@@ -1043,28 +1180,13 @@ export default function App() {
     const item = asmItemsRef.current.find((it) => it.itemId === mate.moving!.itemId);
     if (!item) return;
     const next = composeRigid(matePreview, { R: item.transform.R, t: item.transform.t as Rigid['t'] });
-    const before = snapshot();
-    const nextItems = asmItemsRef.current.map((it) => (it.itemId === item.itemId ? { ...it, transform: { R: next.R, t: next.t } } : it));
-    setPendingMotion({ keys: partKeysOf(item.itemId), R: matePreview.R, t: matePreview.t, layout: layoutKey(nextItems) });
+    // the preview stays on screen as the applied layout's correction until the result for it lands
+    setLiveDrag({ itemId: item.itemId, G: conjugateRigid(resultPlace, matePreview) });
     setMate({ ...MATE_START });
-    setAsmBusy(true);
-    try {
-      const info = await clientRef.current!.setPlacements([{ itemId: item.itemId, R: next.R, t: next.t }]);
-      setAsmHistory((h) => [...h, before]);
-      applyInfo(info, false);
-    } catch (err) {
-      setPendingMotion(null);
-      toast({ kind: 'error', title: "Couldn't apply the mate", message: (err as Error).message });
-    } finally {
-      setAsmBusy(false);
-    }
+    await commitPlacement(item.itemId, next, "Couldn't apply the mate");
   };
   const onMateCancel = () => setMate((m) => (m ? { ...MATE_START } : m));
 
-  // an applied mate's preview stays until the result for the new layout lands
-  useEffect(() => {
-    if (pendingMotion && resultLayout === pendingMotion.layout) setPendingMotion(null);
-  }, [resultLayout, pendingMotion]);
   // fewer than two files: nothing to assemble
   useEffect(() => {
     if (asmItems.length < 2 && activeTool === 'assemble') {
@@ -1089,17 +1211,114 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [activeTool]);
 
-  const movingKeys = useMemo(() => (mate?.moving ? partKeysOf(mate.moving.itemId) : []), [mate, asmSources]); // eslint-disable-line react-hooks/exhaustive-deps
-  const partMotion = useMemo<PartMotion | null>(
-    () => (matePreview && movingKeys.length ? { keys: movingKeys, R: matePreview.R, t: matePreview.t } : pendingMotion),
-    [matePreview, movingKeys, pendingMotion],
-  );
+  /** Display motion of one file: the live gizmo drag / mate preview on top of its correction. */
+  const displayMotion = (itemId: string): Rigid | null => {
+    const base = corrections.get(itemId);
+    if (!base) return null;
+    if (liveDrag?.itemId === itemId) return composeRigid(liveDrag.G, base);
+    if (matePreview && mate?.moving?.itemId === itemId) return composeRigid(conjugateRigid(resultPlace, matePreview), base);
+    return base;
+  };
+  const partMotions = useMemo<PartMotion[]>(() => {
+    const out: PartMotion[] = [];
+    for (const p of resultRun?.layout.items ?? []) {
+      const m = displayMotion(p.itemId);
+      if (!m || isIdentityRigid(m, 1e-7)) continue;
+      const keys = resultKeysOf(p.itemId);
+      if (keys.length) out.push({ keys, R: m.R, t: m.t });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resultRun, corrections, liveDrag, matePreview, mate]);
   const mateFaces = useMemo<MateFace[]>(() => {
     const out: MateFace[] = [];
     if (mate?.moving) out.push({ ...mate.moving, color: MOVING_COLOR });
     if (mate?.target) out.push({ ...mate.target, color: TARGET_COLOR });
     return out;
   }, [mate]);
+
+  // ---- move / rotate gizmo ----------------------------------------------------------------------
+  /** Bbox centre and size of the selected file as shown now (its correction applied, no live drag). */
+  const gizmoBase = useMemo(() => {
+    if (activeTool !== 'assemble' || !movingItemId || !result?.model) return null;
+    const base = corrections.get(movingItemId);
+    if (!base) return null;
+    const min: Vec3 = [Infinity, Infinity, Infinity], max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (const key of resultKeysOf(movingItemId)) {
+      const [j, k] = key.split(':').map(Number);
+      const v = result.model.objects[j]?.parts[k]?.mesh.vertices;
+      if (!v) continue;
+      for (let i = 0; i < v.length; i += 3) {
+        const q = applyRigid(base, [v[i], v[i + 1], v[i + 2]]);
+        for (let a = 0; a < 3; a++) {
+          if (q[a] < min[a]) min[a] = q[a];
+          if (q[a] > max[a]) max[a] = q[a];
+        }
+      }
+    }
+    if (!(min[0] <= max[0])) return null;
+    const ext = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    return { centre: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2] as Vec3, size: Math.min(80, Math.max(8, ext * 0.6)) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool, movingItemId, result, corrections]);
+  /** The mate frame on the target face (display coordinates), for the ring + slide arrows. */
+  const mateFrame = useMemo(() => {
+    if (mate?.step !== 'preview' || !mate.target || !result?.model) return null;
+    const tf = faceInAssembly(mate.target);
+    if (!tf) return null;
+    const [u, v] = planeBasis(tf.normal);
+    return {
+      centre: applyRigid(resultPlace, tf.centroid),
+      axis: rotateVec(resultPlace, tf.normal),
+      u: rotateVec(resultPlace, u),
+      v: rotateVec(resultPlace, v),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mate?.step, mate?.target, result, toAssembly]);
+  const gizmo = useMemo<GizmoSpec | null>(() => {
+    if (activeTool !== 'assemble' || asmItems.length < 2 || !gizmoBase) return null;
+    if (mate?.step === 'preview') return mateFrame ? { kind: 'mate', size: gizmoBase.size, ...mateFrame } : null;
+    // while a pick is half done the arrows would sit on top of the faces to click
+    if (mate?.step === 'pickTarget') return null;
+    const centre = liveDrag?.itemId === movingItemId ? applyRigid(liveDrag.G, gizmoDragCentre.current ?? gizmoBase.centre) : gizmoBase.centre;
+    return { kind: 'free', centre, size: gizmoBase.size };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool, asmItems.length, gizmoBase, mate?.step, mateFrame, liveDrag, movingItemId]);
+
+  const onGizmo = (e: GizmoEvent) => {
+    if (e.handle === 'ring' || e.handle === 'slideU' || e.handle === 'slideV') {
+      if (!mate || mate.step !== 'preview') return;
+      const base = (mateDragBase.current ??= { angle: mate.angle, slide: [...mate.slide] as [number, number] });
+      let next: Partial<MateState>;
+      if (e.phase === 'cancel') next = { angle: base.angle, slide: base.slide };
+      else if (e.handle === 'ring') next = { angle: wrapDeg(base.angle + e.value) };
+      else next = { slide: e.handle === 'slideU' ? [base.slide[0] + e.value, base.slide[1]] : [base.slide[0], base.slide[1] + e.value] };
+      setMate((m) => (m ? { ...m, ...next } : m));
+      if (e.phase !== 'move') mateDragBase.current = null;
+      return;
+    }
+    // free move / rotate of the selected file: display-only while dragging, one placement on release
+    if (!movingItemId || asmBusy) return;
+    const rotating = e.handle === 'rx' || e.handle === 'ry' || e.handle === 'rz';
+    const G = rotating ? rotateAboutRigid(e.axis, e.centre, e.value) : translateRigid(e.axis, e.value);
+    if (e.phase === 'move') {
+      if (!gizmoDragCentre.current) gizmoDragCentre.current = gizmoBase?.centre ?? e.centre;
+      setLiveDrag({ itemId: movingItemId, G });
+      return;
+    }
+    gizmoDragCentre.current = null;
+    const item = asmItemsRef.current.find((it) => it.itemId === movingItemId);
+    if (e.phase === 'cancel' || !item || e.value === 0) {
+      setLiveDrag(null);
+      return;
+    }
+    setLiveDrag({ itemId: movingItemId, G });
+    // displayed motion G -> assembly space: O⁻¹ ∘ G ∘ O, applied on top of the file's placement
+    const Gasm = conjugateRigid(invertRigid(resultPlace), G);
+    const next = composeRigid(Gasm, { R: item.transform.R, t: item.transform.t as Rigid['t'] });
+    void commitPlacement(item.itemId, next, "Couldn't move that file");
+  };
+
   const fileName = (id: string | null | undefined) => (id ? (asmItems.find((it) => it.itemId === id)?.fileName ?? null) : null);
   const matePanel: MatePanel | null = mate
     ? {
@@ -1110,6 +1329,7 @@ export default function App() {
         flip: mate.flip,
         angle: mate.angle,
         updating: asmUpdating,
+        canMove: !!movingItemId && !!gizmoBase,
       }
     : null;
   const fileRows: AssemblyFileRow[] = asmItems.map((it) => {
@@ -1120,6 +1340,131 @@ export default function App() {
     setMovingItemId(itemId);
     if (asmItems.length >= 2 && activeTool !== 'assemble') onToolChange('assemble');
   };
+
+  // ---- auto-save / restore (IndexedDB) -------------------------------------------------------------
+  // The files, their placements, visibility, painted faces, textures and lay-on-face pose, plus the camo image.
+  useEffect(() => {
+    if (restoringRef.current || !asmItems.length) return;
+    const gen = saveGenRef.current;
+    const handle = window.setTimeout(async () => {
+      try {
+        const files = asmItems.map((it) => filesRef.current.get(it.itemId));
+        if (files.some((f) => !f)) return;
+        const total = files.reduce((n, f) => n + f!.size, 0) + (image?.blob.size ?? 0);
+        if (total > SAVE_LIMIT_BYTES) {
+          if (!overLimitRef.current) {
+            overLimitRef.current = true;
+            toast({
+              kind: 'warning',
+              title: 'Too big to auto-save',
+              message: `These files add up to ${Math.round(total / 1048576)} MB (the limit is ${SAVE_LIMIT_BYTES / 1048576} MB), so a reload won't bring them back.`,
+            });
+          }
+          savedIdsRef.current = new Set();
+          await clearSession();
+          return;
+        }
+        overLimitRef.current = false;
+        if (!savedIdsRef.current) savedIdsRef.current = await storedFileIds();
+        const stored = savedIdsRef.current;
+        const newFiles = [];
+        for (const [i, it] of asmItems.entries()) {
+          if (!stored.has(it.itemId)) newFiles.push({ itemId: it.itemId, name: it.fileName, bytes: await files[i]!.arrayBuffer() });
+        }
+        const hiddenItems = asmItems
+          .filter((it) => {
+            const keys = partKeysOf(it.itemId);
+            return keys.length > 0 && keys.every((k) => hiddenParts.has(k));
+          })
+          .map((it) => it.itemId);
+        const state: SavedState = {
+          version: 1,
+          items: asmItems.map((it) => ({ itemId: it.itemId, fileName: it.fileName, transform: it.transform })),
+          hiddenItems,
+          paintedFaces: params.paintedFaces,
+          textures: params.textures,
+          orientation: params.orientation,
+          image: image ? { blob: image.blob, name: image.name, presetId: selectedPresetId } : null,
+          savedAt: Date.now(),
+        };
+        // cleared (or restored over) while this save was reading the files
+        if (gen !== saveGenRef.current) return;
+        await saveSession(state, newFiles);
+        savedIdsRef.current = new Set(asmItems.map((it) => it.itemId));
+      } catch (err) {
+        console.warn('Auto-save failed', err);
+      }
+    }, 1000);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asmItems, asmSources, hiddenParts, params.paintedFaces, params.textures, params.orientation, image, selectedPresetId]);
+
+  const startFreshRef = useRef(onClearModel);
+  startFreshRef.current = onClearModel;
+  // a saved session comes back on load (StrictMode runs this twice; the first pass is cancelled before it acts)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let saved: Awaited<ReturnType<typeof loadSession>> = null;
+      try {
+        saved = await loadSession();
+      } catch {
+        return;
+      }
+      const client = clientRef.current;
+      if (cancelled || !saved || !client || asmItemsRef.current.length) return;
+      const { state, files } = saved;
+      restoringRef.current = true;
+      setAsmBusy(true);
+      try {
+        if (state.image) {
+          setSelectedPresetId(state.image.presetId);
+          await onImageFile(new File([state.image.blob], state.image.name, { type: state.image.blob.type }));
+        }
+        setBusyLabel('Restoring your last assembly…');
+        let info: ModelInfo | null = null;
+        for (const [i, it] of state.items.entries()) {
+          const f = files.get(it.itemId)!;
+          const file = new File([f.bytes], f.name);
+          const bytes = f.bytes.slice(0);
+          if (i === 0) {
+            info = await client.setModel(bytes, it.fileName, it.itemId);
+            filesRef.current = new Map([[it.itemId, file]]);
+            setAsmHistory([]);
+            applyInfo(info, true);
+          } else {
+            info = await client.addModelFile(it.itemId, bytes, it.fileName, { transform: { R: it.transform.R, t: it.transform.t } });
+            filesRef.current.set(it.itemId, file);
+            applyInfo(info, false);
+          }
+        }
+        info = await client.setPlacements(state.items.map((it) => ({ itemId: it.itemId, R: it.transform.R, t: it.transform.t })));
+        applyInfo(info, false);
+        const hidden = new Set<string>();
+        info.sources.forEach((row, j) => row.forEach((src, k) => state.hiddenItems.includes(src.itemId) && hidden.add(`${j}:${k}`)));
+        setHiddenParts(hidden);
+        setParams((p) => ({ ...p, paintedFaces: state.paintedFaces, textures: state.textures, orientation: state.orientation }));
+        savedIdsRef.current = new Set(state.items.map((it) => it.itemId));
+        toast({
+          kind: 'info',
+          title: state.items.length > 1 ? 'Restored your last assembly' : 'Restored your last model',
+          message: state.items.map((it) => it.fileName).join(', '),
+          action: { label: 'Start fresh', onClick: () => startFreshRef.current() },
+        });
+      } catch (err) {
+        toast({ kind: 'error', title: "Couldn't restore your last assembly", message: (err as Error).message });
+        clearSession().catch(() => {});
+      } finally {
+        setBusyLabel(null);
+        setAsmBusy(false);
+        restoringRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // The header title shows what's loaded: the model's file name, else the picked camo's name, else the image's.
   const presetName = selectedPresetId ? (presets?.items.find((p) => p.id === selectedPresetId)?.name ?? null) : null;
@@ -1301,7 +1646,9 @@ export default function App() {
                   onTextureStroke={onTextureStroke}
                   onAssemblePick={onAssemblePick}
                   mateFaces={mateFaces}
-                  partMotion={partMotion}
+                  partMotions={partMotions}
+                  gizmo={gizmo}
+                  onGizmo={onGizmo}
                 />
               </div>
 

@@ -8,6 +8,8 @@ export interface ToastInput {
   kind: ToastKind;
   title: string;
   message?: string;
+  /** One button in the toast (dismisses it when clicked). */
+  action?: { label: string; onClick: () => void };
 }
 interface ToastItem extends ToastInput {
   id: number;
@@ -91,6 +93,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <div className="toast-body">
               <div className="toast-title">{t.title}</div>
               {t.message && <div className="toast-msg">{t.message}</div>}
+              {t.action && (
+                <button
+                  type="button"
+                  className="toast-action"
+                  onClick={() => {
+                    dismiss(t.id);
+                    t.action!.onClick();
+                  }}
+                >
+                  {t.action.label}
+                </button>
+              )}
             </div>
             <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => dismiss(t.id)}>
               <Icon name="close" />

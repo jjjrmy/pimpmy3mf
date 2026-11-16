@@ -7,7 +7,7 @@
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { zipSync } from 'fflate';
 
-import { composeAssembly, placeBeside, type AssemblyItem } from '../core/assembly';
+import { assemblyStem, composeAssembly, exportFilename, placeBeside, type AssemblyItem } from '../core/assembly';
 import { createPipeline } from '../core/pipeline';
 import { initManifold } from '../core/manifold';
 import { loadModel, writeStl } from '../core/meshio';
@@ -15,7 +15,7 @@ import { objectsFromResult, writeBambuProject, writePlain3mf } from '../core/thr
 import type { Model, Pipeline, RasterImage, Result } from '../core/types';
 
 import { drawColorMap, fadeOutsideSilhouette, mapScale, type MapRegion } from '../ui/colorMap';
-import type { ExportOpts, ExportResult, ModelInfo, Request, Response } from './messages';
+import type { ExportOpts, ExportResult, ModelInfo, Request, Response, RunLayout } from './messages';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -26,6 +26,8 @@ let model: Model | null = null;
 let modelStem = 'model';
 /** Assemble mode: the loaded files (as parsed) and their placements; `model` is their composition. */
 let items: AssemblyItem[] = [];
+/** Where each part of `model` came from (the last recompose). */
+let composedSources: ModelInfo['sources'] = [];
 let lastResult: Result | null = null;
 let currentSignal: { cancelled: boolean } | null = null;
 
@@ -143,13 +145,13 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
         files[`${imageStem}-face-${i + 1}-${hex}.stl`] = writeStl(s.mesh);
       });
       const bytes = zipSync(files, { level: 6 });
-      return { filename: `${base}-${n}colors-stls.zip`, bytes, mime: 'application/zip', warnings: [] };
+      return { filename: exportFilename('stl-zip', base, n), bytes, mime: 'application/zip', warnings: [] };
     }
     case 'plain-3mf': {
       // paint mode: one object per input object, its parts kept separate and named, modifiers per object
       const objects = objectsFromResult(result, hexes, imageStem);
       const bytes = writePlain3mf(objects);
-      return { filename: `${base}-${n}colors-plain.3mf`, bytes, mime: 'model/3mf', warnings: [] };
+      return { filename: exportFilename('plain-3mf', base, n), bytes, mime: 'model/3mf', warnings: [] };
     }
     case 'bambu-3mf': {
       const objects = objectsFromResult(result, hexes, imageStem);
@@ -169,12 +171,12 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
                 : w,
             )
           : raw;
-      return { filename: `${base}-${n}colors.3mf`, bytes, mime: 'model/3mf', warnings };
+      return { filename: exportFilename('bambu-3mf', base, n), bytes, mime: 'model/3mf', warnings };
     }
     case 'preview-png': {
       if (!image) throw new Error('No image loaded to build a preview.');
       const bytes = await renderPreview(result, hexes, image);
-      return { filename: `${base}-${n}colors-preview.png`, bytes, mime: 'image/png', warnings: [] };
+      return { filename: exportFilename('preview-png', base, n), bytes, mime: 'image/png', warnings: [] };
     }
     default:
       throw new Error(`Unknown export kind: ${kind}`);
@@ -195,11 +197,14 @@ function recompose(): ModelInfo {
   if (!items.length) {
     model = null;
     modelStem = 'model';
+    composedSources = [];
     return { triangles: 0, objects: [], sources: [], items: [] };
   }
   const composed = composeAssembly(items);
   model = composed.model;
-  modelStem = items.length === 1 ? safeStem(items[0].fileName) : 'assembly';
+  composedSources = composed.sources;
+  // one file keeps its own stem; an assembly is named after its first files ("grip+mount+2")
+  modelStem = items.length === 1 ? safeStem(items[0].fileName) : assemblyStem(items.map((it) => it.fileName));
   return {
     triangles: countTriangles(model),
     objects: model.objects.map((o) => ({ name: o.name, parts: o.parts.map((p) => p.name) })),
@@ -236,8 +241,12 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
       }
       case 'addModelFile': {
         const loaded: Model = loadModel(new Uint8Array(msg.bytes), msg.filename);
-        const transform = placeBeside(items, loaded);
-        items = [...items.filter((it) => it.id !== msg.itemId), { id: msg.itemId, fileName: msg.filename, model: loaded, transform }];
+        const others = items.filter((it) => it.id !== msg.itemId);
+        const transform = msg.transform ? { R: msg.transform.R.slice(), t: [...msg.transform.t] as [number, number, number] } : placeBeside(others, loaded);
+        const item: AssemblyItem = { id: msg.itemId, fileName: msg.filename, model: loaded, transform };
+        // an undone remove goes back to its old place in the list (so part indices match what they were)
+        const at = msg.index != null ? Math.max(0, Math.min(others.length, msg.index)) : others.length;
+        items = [...others.slice(0, at), item, ...others.slice(at)];
         post({ type: 'assembly:ok', reqId: msg.reqId, info: recompose() });
         break;
       }
@@ -267,6 +276,11 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
         const signal = { cancelled: false };
         currentSignal = signal;
         const pipe = await ensurePipeline();
+        // the layout this run paints (a placement change while it runs recomposes `model`, not this run's input)
+        const layout: RunLayout = {
+          items: items.map((it) => ({ itemId: it.id, R: it.transform.R.slice(), t: [...it.transform.t] as [number, number, number] })),
+          sources: composedSources,
+        };
         const result = await pipe.run(image, msg.useModel ? model : null, msg.params, {
           signal,
           onProgress: (stage, fraction) => {
@@ -279,7 +293,7 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
           break;
         }
         lastResult = result;
-        post({ type: 'run:ok', reqId: msg.reqId, result }); // structured clone, arrays not transferred
+        post({ type: 'run:ok', reqId: msg.reqId, result, layout }); // structured clone, arrays not transferred
         break;
       }
       case 'export': {

@@ -41,11 +41,27 @@ export interface Placement {
   t: [number, number, number];
 }
 
+/** The assembly layout a run painted: every file's placement and the composed parts' sources. */
+export interface RunLayout {
+  items: Placement[];
+  sources: ModelInfo['sources'];
+}
+
 // ---- UI -> worker
 export type Request =
   | { type: 'setImage'; reqId: number; blob: Blob; name: string }
   | { type: 'setModel'; reqId: number; bytes: ArrayBuffer; filename: string; itemId?: string }
-  | { type: 'addModelFile'; reqId: number; itemId: string; bytes: ArrayBuffer; filename: string }
+  | {
+      type: 'addModelFile';
+      reqId: number;
+      itemId: string;
+      bytes: ArrayBuffer;
+      filename: string;
+      /** List position (default: the end). */
+      index?: number;
+      /** Placement (default: beside the assembly). */
+      transform?: { R: number[]; t: [number, number, number] };
+    }
   | { type: 'removeModelFile'; reqId: number; itemId: string }
   | { type: 'setPlacements'; reqId: number; placements: Placement[] }
   | { type: 'clearModel'; reqId: number }
@@ -60,7 +76,7 @@ export type Response =
   | { type: 'setModel:ok'; reqId: number; info: ModelInfo }
   | { type: 'assembly:ok'; reqId: number; info: ModelInfo }
   | { type: 'clearModel:ok'; reqId: number }
-  | { type: 'run:ok'; reqId: number; result: Result }
+  | { type: 'run:ok'; reqId: number; result: Result; layout: RunLayout }
   | { type: 'export:ok'; reqId: number; result: ExportResult }
   | { type: 'dispose:ok'; reqId: number }
   | { type: 'error'; reqId: number; name: string; message: string };

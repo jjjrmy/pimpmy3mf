@@ -2190,6 +2190,20 @@ input[type='color'] {
   color: var(--text-soft);
   word-break: break-word;
 }
+.toast-action {
+  margin-top: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.18));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.toast-action:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
 .toast-close {
   display: grid;
   place-items: center;

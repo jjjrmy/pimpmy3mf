@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { Mesh as CoreMesh, FaceTexture, PaintedFace, Result, Vec3 } from '../core/types';
 import { buildAdjacency, planarRegion, smoothRegion } from '../core/faces';
+import { angleDelta, rayAngleAbout, rayLineParam, snapGizmo } from '../core/assembly';
 import { CYL_BASIS } from '../core/cylinder';
 import { drawColorMap, mapScale, projectUV, type MapRegion } from './colorMap';
 import type { ViewportTool } from './ViewportTools';
@@ -60,8 +61,39 @@ interface Viewer3DProps {
   onAssemblePick?: (pick: FacePick) => void;
   /** Assemble: the chosen moving / target faces, drawn in their own colors. */
   mateFaces?: MateFace[];
-  /** Assemble preview: a rigid motion (result.model coordinates) shown on these parts (`${j}:${k}`) without a re-run. */
-  partMotion?: PartMotion | null;
+  /**
+   * Assemble: rigid motions (result.model coordinates) shown on parts (`${j}:${k}`) without a re-run: a mate or
+   * gizmo preview, or a placement the displayed result doesn't have yet.
+   */
+  partMotions?: PartMotion[];
+  /** Assemble: the move / rotate gizmo to draw (result.model coordinates), or null. */
+  gizmo?: GizmoSpec | null;
+  /** A gizmo handle was dragged: `value` is the snapped total since the press (mm or degrees). */
+  onGizmo?: (e: GizmoEvent) => void;
+}
+
+/** free: X/Y/Z arrows + rings about X/Y/Z. mate: a ring about the target normal + two in-plane slide arrows. */
+export interface GizmoSpec {
+  kind: 'free' | 'mate';
+  centre: Vec3;
+  /** Handle length, mm. */
+  size: number;
+  /** mate: ring axis (target normal) and slide directions (u × v = axis). */
+  axis?: Vec3;
+  u?: Vec3;
+  v?: Vec3;
+}
+
+export type GizmoHandle = 'tx' | 'ty' | 'tz' | 'rx' | 'ry' | 'rz' | 'ring' | 'slideU' | 'slideV';
+
+export interface GizmoEvent {
+  handle: GizmoHandle;
+  phase: 'move' | 'end' | 'cancel';
+  /** Snapped total since the press: mm for arrows, degrees for rings. */
+  value: number;
+  /** The handle's direction / axis (result.model coordinates) and the gizmo centre at the press. */
+  axis: Vec3;
+  centre: Vec3;
 }
 
 export interface MateFace {
@@ -82,6 +114,8 @@ export interface PartMotion {
 interface Scene {
   /** Assemble: moving / target face overlays. */
   mateMeshes?: { mesh: THREE.Mesh; key: string }[];
+  /** Assemble: the move / rotate gizmo. */
+  gizmo?: THREE.Group | null;
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -291,7 +325,9 @@ export function Viewer3D({
   onTextureStroke,
   onAssemblePick,
   mateFaces,
-  partMotion,
+  partMotions,
+  gizmo,
+  onGizmo,
 }: Viewer3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -312,8 +348,13 @@ export function Viewer3D({
   onLayRef.current = onLayPick;
   const onAssembleRef = useRef(onAssemblePick);
   onAssembleRef.current = onAssemblePick;
-  const partMotionRef = useRef(partMotion);
-  partMotionRef.current = partMotion;
+  const motionMap = motionMatrices(partMotions);
+  const motionRef = useRef(motionMap);
+  motionRef.current = motionMap;
+  const gizmoRef = useRef(gizmo);
+  gizmoRef.current = gizmo;
+  const onGizmoRef = useRef(onGizmo);
+  onGizmoRef.current = onGizmo;
   const onStrokeRef = useRef(onPaintStroke);
   onStrokeRef.current = onPaintStroke;
   const brushRef = useRef(brush);
@@ -604,8 +645,11 @@ export function Viewer3D({
       for (const r of result.regions) {
         if (r.index === 0) continue;
         // per-part export: one copy per part; else per object; else the full prism. The texture is identical either way.
-        const copies = (r.partMeshes?.flat() ?? r.objectMeshes ?? [r.mesh]).filter((m): m is CoreMesh => !!m);
-        const meshes = copies.map((m) => {
+        // per-part copies follow an assemble preview of their part; object-wide ones hide during it
+        const copies: { m: CoreMesh; key: string | null }[] = r.partMeshes
+          ? r.partMeshes.flatMap((row, j) => row.flatMap((m, k) => (m ? [{ m, key: `${j}:${k}` }] : [])))
+          : (r.objectMeshes ?? [r.mesh]).flatMap((m) => (m ? [{ m, key: null }] : []));
+        const meshes = copies.map(({ m, key }) => {
           const prism = new THREE.Mesh(
             toGeometry(m),
             new THREE.MeshStandardMaterial({
@@ -617,7 +661,8 @@ export function Viewer3D({
               flatShading: true,
             }),
           );
-          prism.visible = showModifiers && !hidden.has(r.index);
+          prism.userData.partKey = key;
+          prism.visible = showModifiers && !hidden.has(r.index) && !(key === null && motionRef.current.size > 0);
           prism.renderOrder = 2; // after the ghosted parts
           b.objectGroup.add(prism);
           return prism;
@@ -737,7 +782,7 @@ export function Viewer3D({
           const mat = mesh.material as THREE.MeshStandardMaterial;
           mat.color.set(hexes[idx] ?? result.regions[idx]?.hex ?? '#cccccc');
           mat.opacity = modOpacity;
-          mesh.visible = showModifiers && !hidden.has(idx);
+          mesh.visible = showModifiers && !hidden.has(idx) && !(mesh.userData.partKey == null && motionRef.current.size > 0);
         }
       }
       for (const [key, mesh] of b.partMeshes) mesh.visible = !hiddenParts.has(key);
@@ -798,14 +843,10 @@ export function Viewer3D({
   useEffect(() => {
     const b = sceneRef.current;
     if (!b) return;
-    const moved = new Set(partMotion?.keys ?? []);
-    const m = new THREE.Matrix4();
-    if (partMotion) {
-      const { R, t } = partMotion;
-      m.set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1);
-    }
+    const motions = motionRef.current;
     const place = (mesh: THREE.Object3D, key: string) => {
-      if (moved.has(key)) {
+      const m = motions.get(key);
+      if (m) {
         mesh.matrixAutoUpdate = false;
         mesh.matrix.copy(m);
       } else {
@@ -823,8 +864,16 @@ export function Viewer3D({
     for (const s of b.skinMeshes) place(s.mesh, s.key);
     for (const s of b.innerMeshes) place(s.mesh, s.key);
     for (const s of b.mateMeshes ?? []) place(s.mesh, s.key);
+    for (const [idx, meshes] of b.modifierMeshes)
+      for (const prism of meshes) {
+        const key = prism.userData.partKey as string | null;
+        if (key) place(prism, key);
+        else prism.visible = showModifiers && !hidden.has(idx) && motions.size === 0;
+      }
+    if (b.highlight?.userData.partKey) place(b.highlight, b.highlight.userData.partKey as string);
     b.objectGroup.updateMatrixWorld(true);
-  }, [result, paintedFaces, mateFaces, partMotion]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, paintedFaces, mateFaces, motionKey(partMotions), showModifiers, hidden]);
 
   // ---- active tool: crosshair cursor + hover highlight + click picking ------------------------
   useEffect(() => {
@@ -953,11 +1002,12 @@ export function Viewer3D({
         }),
       );
       // follow an assemble preview that has moved this part
-      const motion = partMotionRef.current;
-      if (motion?.keys.includes(`${pick.objectIndex}:${pick.partIndex}`)) {
-        const { R, t } = motion;
+      const partKey = `${pick.objectIndex}:${pick.partIndex}`;
+      mesh.userData.partKey = partKey;
+      const motion = motionRef.current.get(partKey);
+      if (motion) {
         mesh.matrixAutoUpdate = false;
-        mesh.matrix.set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1);
+        mesh.matrix.copy(motion);
       }
       b.highlight = mesh;
       b.objectGroup.add(mesh);
@@ -989,6 +1039,11 @@ export function Viewer3D({
           toneMapped: false,
         }),
       );
+      const motion = motionRef.current.get(`${pick.objectIndex}:${pick.partIndex}`);
+      if (motion) {
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.copy(motion);
+      }
       b.strokeMeshes.push(mesh);
       b.objectGroup.add(mesh);
     };
@@ -1094,7 +1149,245 @@ export function Viewer3D({
     if (toolsPaused) pauseToolRef.current?.();
   }, [toolsPaused, activeTool]);
 
+  // ---- assemble gizmo: build on shape changes, move on centre changes ---------------------------
+  const gizmoShape = gizmo ? JSON.stringify([gizmo.kind, Math.round(gizmo.size * 10), gizmo.axis, gizmo.u, gizmo.v]) : '';
+  useEffect(() => {
+    const b = sceneRef.current;
+    if (!b) return;
+    if (b.gizmo) {
+      b.objectGroup.remove(b.gizmo);
+      disposeGroup(b.gizmo);
+      b.gizmo = null;
+    }
+    const spec = gizmoRef.current;
+    if (!spec) return;
+    b.gizmo = buildGizmo(spec);
+    b.gizmo.position.set(...spec.centre);
+    b.objectGroup.add(b.gizmo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gizmoShape, result]);
+  useEffect(() => {
+    const g = sceneRef.current?.gizmo;
+    if (g && gizmo) g.position.set(...gizmo.centre);
+  }, [gizmo?.centre[0], gizmo?.centre[1], gizmo?.centre[2], gizmoShape, result]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // gizmo drags: a capture listener on the mount wins over OrbitControls and the tool handlers on the canvas
+  useEffect(() => {
+    const b = sceneRef.current;
+    const mount = mountRef.current;
+    if (!b || !mount || !gizmoShape) return;
+    const canvas = b.renderer.domElement;
+    const raycaster = new THREE.Raycaster();
+    const rayAt = (clientX: number, clientY: number): { o: Vec3; d: Vec3 } | null => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      raycaster.setFromCamera(
+        new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1),
+        b.camera,
+      );
+      // result.model coordinates = objectGroup's local frame (a pure translation)
+      const o = b.objectGroup.worldToLocal(raycaster.ray.origin.clone());
+      const d = raycaster.ray.direction;
+      return { o: [o.x, o.y, o.z], d: [d.x, d.y, d.z] };
+    };
+    const handleAt = (clientX: number, clientY: number): THREE.Object3D | null => {
+      if (!b.gizmo) return null;
+      if (!rayAt(clientX, clientY)) return null;
+      const hits = raycaster.intersectObject(b.gizmo, true);
+      return hits.find((h) => h.object.userData.handle)?.object ?? null;
+    };
+    let drag: {
+      handle: GizmoHandle;
+      axis: Vec3;
+      centre: Vec3;
+      rotate: boolean;
+      start: number;
+      last: number;
+      total: number;
+      pointerId: number;
+    } | null = null;
+    let hovered: THREE.Object3D | null = null;
+    const setHover = (o: THREE.Object3D | null) => {
+      const group = (x: THREE.Object3D | null) => (x ? (x.userData.handleRoot as THREE.Object3D) : null);
+      const prev = group(hovered), next = group(o);
+      if (prev !== next) {
+        prev?.traverse((c) => c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial && c.material.visible && (c.material.opacity = 0.85));
+        next?.traverse((c) => c instanceof THREE.Mesh && c.material instanceof THREE.MeshBasicMaterial && c.material.visible && (c.material.opacity = 1));
+      }
+      hovered = o;
+      if (!drag) canvas.style.cursor = o ? 'grab' : toolRef.current ? (pausedRef.current ? 'progress' : 'crosshair') : '';
+    };
+    const measure = (o: Vec3, d: Vec3): number | null =>
+      drag!.rotate ? rayAngleAbout(drag!.centre, drag!.axis, o, d) : rayLineParam(drag!.centre, drag!.axis, o, d);
+    const emit = (phase: GizmoEvent['phase'], free: boolean) => {
+      if (!drag) return;
+      const raw = drag.rotate ? (drag.total * 180) / Math.PI : drag.total;
+      onGizmoRef.current?.({ handle: drag.handle, phase, value: snapGizmo(drag.rotate ? 'rotate' : 'translate', raw, free), axis: drag.axis, centre: drag.centre });
+    };
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0 || drag) return;
+      const hit = handleAt(e.clientX, e.clientY);
+      if (!hit || !b.gizmo) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const handle = hit.userData.handle as GizmoHandle;
+      // the handle's axis in result.model coordinates (the gizmo is only translated within objectGroup)
+      const a = (hit.userData.handleRoot as THREE.Object3D).userData.axis as Vec3;
+      const c = b.gizmo.position;
+      drag = { handle, axis: a, centre: [c.x, c.y, c.z], rotate: hit.userData.rotate === true, start: 0, last: 0, total: 0, pointerId: e.pointerId };
+      const ray = rayAt(e.clientX, e.clientY)!;
+      const m0 = measure(ray.o, ray.d);
+      if (m0 === null) {
+        drag = null;
+        return;
+      }
+      drag.start = drag.last = m0;
+      b.controls.enabled = false;
+      canvas.style.cursor = 'grabbing';
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture is a nicety */
+      }
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onCancel);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!drag) return;
+      const ray = rayAt(e.clientX, e.clientY);
+      const m = ray ? measure(ray.o, ray.d) : null;
+      if (m === null) return;
+      if (drag.rotate) {
+        drag.total += angleDelta(drag.last, m);
+        drag.last = m;
+      } else drag.total = m - drag.start;
+      emit('move', e.shiftKey);
+    };
+    const finish = (phase: 'end' | 'cancel', free: boolean) => {
+      if (!drag) return;
+      emit(phase, free);
+      try {
+        canvas.releasePointerCapture(drag.pointerId);
+      } catch {
+        /* already released */
+      }
+      drag = null;
+      b.controls.enabled = true;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      setHover(null);
+    };
+    const onUp = (e: PointerEvent) => finish('end', e.shiftKey);
+    const onCancel = () => finish('cancel', false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && drag) {
+        e.stopPropagation();
+        finish('cancel', false);
+      }
+    };
+    const onHover = (e: PointerEvent) => {
+      if (!drag) setHover(handleAt(e.clientX, e.clientY));
+    };
+    mount.addEventListener('pointerdown', onDown, { capture: true });
+    mount.addEventListener('pointermove', onHover);
+    window.addEventListener('keydown', onKey, { capture: true });
+    return () => {
+      finish('cancel', false);
+      mount.removeEventListener('pointerdown', onDown, { capture: true });
+      mount.removeEventListener('pointermove', onHover);
+      window.removeEventListener('keydown', onKey, { capture: true });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gizmoShape]);
+
   return <div ref={mountRef} className="viewer3d" />;
+}
+
+/** Part key -> display matrix for the given motions (later entries win). */
+function motionMatrices(motions: PartMotion[] | undefined): Map<string, THREE.Matrix4> {
+  const out = new Map<string, THREE.Matrix4>();
+  for (const { keys, R, t } of motions ?? []) {
+    const m = new THREE.Matrix4().set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1);
+    for (const k of keys) out.set(k, m);
+  }
+  return out;
+}
+
+/** Cheap identity of a motion list, for effect deps. */
+function motionKey(motions: PartMotion[] | undefined): string {
+  return (motions ?? []).map((m) => `${m.keys.join(',')}|${m.R.map((x) => x.toFixed(6)).join(',')}|${m.t.map((x) => x.toFixed(4)).join(',')}`).join(';');
+}
+
+const AXIS_COLORS = { x: 0xff4d5e, y: 0x4fd16a, z: 0x4d8dff };
+const GIZMO_ACCENT = 0xffb020;
+
+function handleMaterial(color: number): THREE.MeshBasicMaterial {
+  return new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false, toneMapped: false });
+}
+
+/** A double-headed arrow along `dir` (an invisible fat proxy makes it easy to grab). */
+function gizmoArrow(dir: Vec3, size: number, color: number, handle: GizmoHandle): THREE.Group {
+  const g = new THREE.Group();
+  const mat = handleMaterial(color);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.025, size * 0.025, size * 2, 8), mat);
+  g.add(shaft);
+  for (const s of [1, -1]) {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.08, size * 0.22, 16), mat);
+    cone.position.y = s * size * 1.11;
+    if (s < 0) cone.rotation.z = Math.PI;
+    g.add(cone);
+  }
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(size * 0.12, size * 0.12, size * 2.4, 8), new THREE.MeshBasicMaterial({ visible: false })));
+  g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...dir).normalize());
+  g.userData.axis = dir;
+  g.traverse((o) => {
+    o.userData.handle = handle;
+    o.userData.handleRoot = g;
+  });
+  return g;
+}
+
+/** A ring about `axis` (radius `size`). */
+function gizmoRing(axis: Vec3, size: number, color: number, handle: GizmoHandle): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.TorusGeometry(size, size * 0.02, 8, 96), handleMaterial(color)));
+  g.add(new THREE.Mesh(new THREE.TorusGeometry(size, size * 0.09, 6, 48), new THREE.MeshBasicMaterial({ visible: false })));
+  // the torus lies in its local XY plane: turn its +Z onto the axis
+  g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...axis).normalize());
+  g.userData.axis = axis;
+  g.traverse((o) => {
+    o.userData.handle = handle;
+    o.userData.handleRoot = g;
+    o.userData.rotate = true;
+  });
+  return g;
+}
+
+function buildGizmo(spec: GizmoSpec): THREE.Group {
+  const g = new THREE.Group();
+  const s = Math.max(4, spec.size);
+  if (spec.kind === 'free') {
+    g.add(
+      gizmoArrow([1, 0, 0], s, AXIS_COLORS.x, 'tx'),
+      gizmoArrow([0, 1, 0], s, AXIS_COLORS.y, 'ty'),
+      gizmoArrow([0, 0, 1], s, AXIS_COLORS.z, 'tz'),
+      gizmoRing([1, 0, 0], s * 0.8, AXIS_COLORS.x, 'rx'),
+      gizmoRing([0, 1, 0], s * 0.8, AXIS_COLORS.y, 'ry'),
+      gizmoRing([0, 0, 1], s * 0.8, AXIS_COLORS.z, 'rz'),
+    );
+  } else if (spec.axis && spec.u && spec.v) {
+    g.add(
+      gizmoRing(spec.axis, s, GIZMO_ACCENT, 'ring'),
+      gizmoArrow(spec.u, s * 0.7, GIZMO_ACCENT, 'slideU'),
+      gizmoArrow(spec.v, s * 0.7, GIZMO_ACCENT, 'slideV'),
+    );
+  }
+  g.traverse((o) => {
+    o.renderOrder = 20;
+  });
+  return g;
 }
 
 /** Bounds of what actually prints (all model parts, or the image-mode parts), ignoring modifier margins. */

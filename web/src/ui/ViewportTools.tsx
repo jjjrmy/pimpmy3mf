@@ -21,6 +21,8 @@ export interface MatePanel {
   angle: number;
   /** The view is catching up with the last change: picks are paused. */
   updating: boolean;
+  /** A file is selected and shown, so the move / rotate gizmo is on it. */
+  canMove?: boolean;
 }
 
 /** Number box committing on blur / Enter (the angle of a mate preview). */
@@ -80,7 +82,7 @@ interface ViewportToolsProps {
 const MATE_HINT: Record<MatePanel['step'], string> = {
   pickMoving: 'Click a face on the part to move.',
   pickTarget: 'Now click the face to put it against, on another file.',
-  preview: 'Adjust, then Apply.',
+  preview: 'Adjust, or drag the ring to spin and the arrows to slide, then Apply.',
 };
 
 const wrapAngle = (a: number) => ((((a + 180) % 360) + 360) % 360) - 180;
@@ -203,6 +205,9 @@ export function ViewportTools({
           <p className="hint tex-hint mate-step">
             {mate.updating ? 'Updating the assembly…' : MATE_HINT[mate.step]}
           </p>
+          {mate.step === 'pickMoving' && mate.canMove && !mate.updating && (
+            <p className="hint tex-hint mate-step">Or drag the gizmo to move / rotate the selected file (1 mm, 15° steps; hold Shift for free).</p>
+          )}
           {(mate.movingName || mate.targetName) && (
             <ul className="mate-legend">
               {mate.movingName && (

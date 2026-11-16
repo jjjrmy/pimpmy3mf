@@ -283,6 +283,11 @@ export interface Result {
   cylinder: CylinderFrame | null;
   /** Echo of params.orientation for this result (null = as loaded). result.model is already in this pose. */
   orientation: number[] | null;
+  /**
+   * The rigid motion lay-on-face applied (as-loaded -> result.model: x' = R·x + t), null when not oriented. Lets the
+   * assemble tool map picks back to assembly space.
+   */
+  orientPlace?: { R: number[]; t: Vec3 } | null;
   /** Paint mode: the model (structure preserved, world coordinates), re-oriented when orientation is set. null in image mode. */
   model: Model | null;
   /**

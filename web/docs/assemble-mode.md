@@ -1,6 +1,6 @@
 # Assemble mode
 
-Status: prototype on branch `captain/assemble-mode`. Not shipped.
+Status: feature-complete on branch `captain/assemble-mode` (rebased on main); browser check pending.
 
 Goal: load several model files, mate them face to face into their final configuration, then paint, texture and export
 the assembly as one Bambu project. Each part can still print on its own plate with the camo lined up across the seams.
@@ -33,25 +33,39 @@ Bambu Studio's Assemble tool (face-to-face and point-to-point) is the second ref
    - for two elongated faces, their long directions line up.
 4. **Adjust** in the mate panel:
    - **Flip**: same-facing instead of opposed, e.g. to stack a part the other way round.
-   - **Offset**: gap along the target normal, 0–20 mm, applied when you let go.
+   - **Offset**: gap along the target normal, 0–20 mm (default 0), applied when you let go. Re-picking only the target
+     face keeps the gap; flip, spin and slide start over.
    - **Rotate**: −90° / +90° buttons plus a free angle box, spinning about the target normal.
+   - **Mate gizmo**: a ring about the target normal (feeds the angle) and two in-plane slide arrows on the target face.
+   - Snapping always uses the full seat (centroid on centroid, long directions lined up); the slide moves off it.
 5. **Apply** commits the placement. **Cancel** restores the part.
-6. **Undo** (button, or Ctrl/Cmd+Z while the tool is active) steps back through mates, adds and removes.
+6. **Undo** (button, or Ctrl/Cmd+Z while the tool is active) steps back through mates, gizmo moves, adds and removes.
+   An undone remove puts the file back at its old list position, with its painted faces and textures.
 
-Highlights: hover is the existing pick highlight. The chosen moving face and target face each keep their own colour
-until Apply or Cancel.
+Highlights: hover is the existing pick highlight and follows a previewed part. The chosen moving face and target face
+each keep their own colour until Apply or Cancel.
 
-**Later: move/rotate gizmo** (designed, not in the prototype)
-- Port BuildBench's `gizmo.ts` + `gizmoMath.ts`: a ring to spin about the mate normal, plus two in-plane slide arrows,
-  shown on the target face while a mate is previewed.
-- A free-placement gizmo (XYZ arrows + 3 rings) for parts with no good face to mate.
-- Both write the same transform as the mate panel, and both are undoable.
+**Move / rotate gizmo** (ported from BuildBench `gizmo.ts` + `gizmoMath.ts`)
+- Shown when the Assemble tool is active, a file is selected (parts list "select", or its face picked) and no mate
+  is half picked or previewed: X/Y/Z arrows and rings about X/Y/Z at the file's bbox centre.
+- Snapping: 1 mm steps for arrows, 15° for rings; hold Shift for free values.
+- During a drag only the display meshes move (client side); one `setPlacements` on release, one undo step.
+  OrbitControls is off while dragging; Esc cancels a drag.
+- In a mate preview the gizmo switches to the mate frame: a ring about the target normal (mate angle) and two slide
+  arrows along `planeBasis(targetNormal)` (mate slide u/v). These only change the preview; Apply commits.
+- Gizmo drags are allowed while a pipeline run is in flight (they're computed client side and stale-safe); face picks
+  are paused with the other tools, as on main.
 
 **Lay on face and assembling**
-- Mates are solved in assembly space.
-- If a lay-on-face orientation is set, entering the Assemble tool resets it, with a toast. Lay it down again once the
-  assembly is done.
-- Composing the two later (keep the orientation and map picks back through it) is a follow-up.
+- `params.orientation` applies to the whole composed assembly, like any model. Entering Assemble keeps it.
+- Item transforms always stay in assembly (unoriented) space. The pipeline reports the lay-on-face motion as
+  `result.orientPlace` (rotation about the bbox centre + re-centre / drop, x' = R·x + t).
+- Picks are read off the displayed result and mapped into current assembly space by
+  `Tcur ∘ Tres⁻¹ ∘ orientPlace⁻¹` per file, where `Tres` is the placement the displayed result was computed for
+  (the worker echoes the run's layout with `run:ok`). So picks also work on a result that lags the layout (a run in
+  flight or cancelled). The mate is solved in assembly space; the preview is shown as `orientPlace ∘ M ∘ orientPlace⁻¹`.
+- A displayed gizmo motion G commits as `orientPlace⁻¹ ∘ G ∘ orientPlace` on top of the file's transform.
+- Proven in `scripts/test-assembly-solver.ts`: orient, mate on the laid pose, un-orient: faces coincident and opposed.
 
 ## Data model
 
@@ -74,6 +88,16 @@ interface AssemblyItem {
   - **removing a file** drops entries on its parts and shifts the part indices after it;
   - **adding a file** appends parts, so existing indices are unchanged.
 
+## Main features with an assembly
+
+- **What counts as inside** (per-triangle openness slider): runs per part of the composed, assembled (and laid)
+  model, like any multi-part upload, at every paint depth.
+- **Texture mapping / unwrap modes**: textures index composed parts, so any part of the assembly can be textured.
+- **Loading pill + tool pausing**: Assemble face picks pause with the other tools while a run is in flight. A mate
+  preview survives a run (its picks index the result's parts; they reset only when the part structure changes).
+- **Modifier prisms**: shown for the assembly. During a preview / gizmo drag (or while the view lags a move), per-part
+  prisms move with their part; object-wide prisms (Per-part OFF) hide until the re-run lands.
+
 ## How it plugs into the pipeline
 
 The composed model is exactly what a multi-part 3MF upload produces today. The rest of the pipeline is unchanged and
@@ -92,14 +116,20 @@ worker):
 
 | Request | Effect |
 |---|---|
-| `addModelFile(bytes, filename)` | parse, store as an item, place beside the assembly → `{ itemId, info }` |
+| `addModelFile(bytes, filename, { index?, transform? })` | parse, store as an item, place beside the assembly (or at `transform`), append (or insert at `index`) |
 | `removeModelFile(itemId)` | drop the item |
 | `setPlacements([{ itemId, R, t }])` | update transforms |
 | `setModel(bytes, filename)` | unchanged: replaces the assembly with one file |
 
-Each request recomposes the model and replies with `ModelInfo`, like `setModel`.
+Each request recomposes the model and replies with `ModelInfo`, like `setModel`. `run:ok` also carries the
+`RunLayout` (every file's placement and the part sources) the run painted.
 
 ## Export
+
+- **Names**: one file keeps its stem. With 2+ files the stem is `<first>+<second>` (+ `+N` when N more follow, e.g.
+  `grip+mount+2`), each part sanitized like a single file's stem and the pair capped at 60 chars. Then the usual
+  `-<image stem>-<N>colors` suffix: `.3mf` (Bambu), `-plain.3mf`, `-stls.zip`, `-preview.png`
+  (`assemblyStem` + `exportFilename` in `src/core/assembly.ts`).
 
 - **One Bambu project**, assembled layout.
   - Per-part ON: one object per part with its own modifiers. Assembled parts usually overlap in XY, so the existing
@@ -110,24 +140,32 @@ Each request recomposes the model and replies with `ModelInfo`, like `setModel`.
 - Recommended default for assemblies: **Per-part ON**. Assembled parts usually overlap in XY, and printing apart is
   the point.
 
-## Persistence (not in the prototype)
+## Persistence
 
-- **Auto-save.** Every item's file bytes and transform go into IndexedDB, alongside painted faces, textures and settings.
-  Restore on reload ("Restore last assembly?").
-- **Save/load assembly.** A `.pimp.json`, or a 3MF with the transforms in metadata, for sharing.
-- Mates aren't stored, only the resulting transforms. A stored mate graph that re-solves (like BuildBench) is more than
-  this tool needs.
+- **Auto-save** (`src/ui/sessionStore.ts`, IndexedDB database `pimpmy3mf-session`, separate from the pattern library):
+  - store `files`: each file's bytes + name, written once per file;
+  - store `state`: item order, transforms, files hidden in the view, painted faces, textures, lay-on-face
+    orientation, and the camo image (blob + name + preset id; cheap, so it's included).
+  - Writes are debounced (1 s) and capped at 200 MB total (files + image); over the cap a warning toast says the
+    session won't come back, and the saved copy is cleared.
+  - Single-file loads persist the same way (one item).
+- **Restore**: on load, a saved session is restored automatically, with an info toast "Restored your last assembly"
+  (or "…model") and a **Start fresh** action (= Clear all).
+- **Clear all** also clears the saved session.
+- Not stored: mates (only the resulting transforms), paint depth / colors / other settings (they have their own
+  localStorage defaults or reset per model).
+- Later: save/load an assembly as a `.pimp.json` or a 3MF with the transforms in metadata, for sharing.
 
 ## Effort and risks
 
 | Piece | Effort |
 |---|---|
-| Prototype: items, compose, worker API, parts list, face mate with flip/offset/rotate, undo | done on the branch |
-| Polish to ship: instant client-side preview while adjusting (move the part's display mesh, recompute once on Apply), edge cases, tests | 2–3 days |
-| Gizmo (mate ring and slides plus free move/rotate) | 2 days |
-| Persistence (IndexedDB auto-save + restore) | 1 day |
-| Keep lay-on-face while assembling | 0.5 day |
-| Interference check (BuildBench `interference.ts`) and "leave mating faces plain" | 2–3 days |
+| Items, compose, worker API, parts list, face mate with flip/offset/rotate/slide, undo | done |
+| Client-side preview (display meshes move, one recompute on Apply / release) | done |
+| Gizmo (mate ring and slides plus free move/rotate) | done |
+| Persistence (IndexedDB auto-save + restore) | done |
+| Keep lay-on-face while assembling | done |
+| Interference check (BuildBench `interference.ts`) and "leave mating faces plain" | later, 2–3 days |
 
 **Risks**
 - **Recompute cost.** Every placement change reruns the full pipeline, including the paint-depth shell carve

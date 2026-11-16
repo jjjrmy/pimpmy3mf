@@ -11,6 +11,7 @@ import type {
   Placement,
   Request,
   Response,
+  RunLayout,
 } from './messages';
 
 type ProgressFn = (stage: string, fraction?: number) => void;
@@ -146,7 +147,7 @@ export class PipelineClient {
         p.resolve(msg.info);
         break;
       case 'run:ok':
-        p.resolve(msg.result);
+        p.resolve({ result: msg.result, layout: msg.layout });
         break;
       case 'export:ok':
         p.resolve(msg.result);
@@ -182,13 +183,26 @@ export class PipelineClient {
     return this.send((reqId) => ({ type: 'setModel', reqId, bytes, filename, itemId }), [bytes]);
   }
 
-  /** Add a file to the assembly (placed beside the others); `info.items` has its placement. */
-  async addModelFile(itemId: string, bytes: ArrayBuffer, filename: string): Promise<ModelInfo> {
+  /**
+   * Add a file to the assembly, placed beside the others (or at `opts.transform`) and appended (or inserted at
+   * `opts.index`); `info.items` has its placement.
+   */
+  async addModelFile(
+    itemId: string,
+    bytes: ArrayBuffer,
+    filename: string,
+    opts?: { index?: number; transform?: { R: number[]; t: [number, number, number] } },
+  ): Promise<ModelInfo> {
     await this.ready;
     const prevFiles = this.files;
-    this.files = [...this.files.filter((f) => f.itemId !== itemId), { itemId, bytes: bytes.slice(0), filename }];
+    const others = this.files.filter((f) => f.itemId !== itemId);
+    const at = opts?.index != null ? Math.max(0, Math.min(others.length, opts.index)) : others.length;
+    this.files = [...others.slice(0, at), { itemId, bytes: bytes.slice(0), filename }, ...others.slice(at)];
     try {
-      const info = await this.send<ModelInfo>((reqId) => ({ type: 'addModelFile', reqId, itemId, bytes, filename }), [bytes]);
+      const info = await this.send<ModelInfo>(
+        (reqId) => ({ type: 'addModelFile', reqId, itemId, bytes, filename, index: opts?.index, transform: opts?.transform }),
+        [bytes],
+      );
       this.remember(info);
       return info;
     } catch (e) {
@@ -227,7 +241,7 @@ export class PipelineClient {
    * Latest-wins: a fresh run cancels the previous one, which rejects with a CancelledError. If the previous
    * run is inside an uninterruptible stage, the worker is replaced so the new run doesn't wait behind it.
    */
-  async run(params: Params, useModel: boolean, onProgress?: ProgressFn): Promise<Result> {
+  async run(params: Params, useModel: boolean, onProgress?: ProgressFn): Promise<{ result: Result; layout: RunLayout }> {
     if (this.active && this.active.stage && UNINTERRUPTIBLE.has(this.active.stage)) this.restart();
     const gen = ++this.runGen;
     await this.ready;
