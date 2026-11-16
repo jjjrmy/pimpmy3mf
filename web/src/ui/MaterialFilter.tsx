@@ -54,6 +54,7 @@ export function MaterialFilter({ options, value, onChange }: MaterialFilterProps
       return;
     }
     if (e.key === 'Escape') {
+      e.preventDefault(); // closing the menu: the viewport tool stays active
       setOpen(false);
       btnRef.current?.focus();
     } else if (e.key === 'ArrowDown') {

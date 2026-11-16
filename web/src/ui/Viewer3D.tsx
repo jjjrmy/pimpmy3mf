@@ -192,7 +192,7 @@ function subGeometry(m: CoreMesh, triangles: number[], lift?: Float32Array | nul
 
 /** See-through stand-in for a printed part while its modifiers are shown. Shared, never disposed. */
 const GLASS = new THREE.MeshStandardMaterial({
-  color: 0xdfe8ee, transparent: true, opacity: 0.16, depthWrite: false, roughness: 0.4, metalness: 0,
+  color: 0xdfe8ee, transparent: true, opacity: 0.3, depthWrite: false, roughness: 0.4, metalness: 0,
 });
 
 function disposeGroup(group: THREE.Group) {
@@ -758,8 +758,11 @@ export function Viewer3D({
         delete m.userData.ownMaterial;
       }
     };
-    // thin depth shells need more opacity than the full prisms to read at all
-    const modOpacity = result.depth != null ? 0.62 : 0.32;
+    // thin depth shells need more opacity than the full prisms to read at all; both must stay readable over the
+    // glass model and the light background (at 0.32 the light camo colors all but vanished)
+    const modOpacity = result.depth != null ? 0.75 : 0.55;
+    // the glass carries filament 1 (the model's own color), so the camo still reads as camo with prisms shown
+    GLASS.color.set(hexes[0] ?? result.regions[0]?.hex ?? '#dfe8ee');
     if (result.mode === 'image') {
       for (const [idx, mesh] of b.regionMeshes) {
         const mat = mesh.material as THREE.MeshStandardMaterial;
@@ -1120,11 +1123,22 @@ export function Viewer3D({
     const onPointerLeave = () => {
       if (!stroke) showHighlight(null);
     };
+    // Esc mid-stroke drops the stroke (nothing painted); stopping the event keeps the tool itself active
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !stroke) return;
+      e.stopPropagation();
+      e.preventDefault();
+      stroke = null;
+      down.active = false;
+      b.controls.enabled = true;
+      clearStrokePreview();
+    };
 
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointerleave', onPointerLeave);
+    window.addEventListener('keydown', onEscape, { capture: true });
 
     return () => {
       pauseToolRef.current = null;
@@ -1134,6 +1148,7 @@ export function Viewer3D({
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointerleave', onPointerLeave);
+      window.removeEventListener('keydown', onEscape, { capture: true });
       b.controls.enabled = true; // never leave orbit disabled if we unmount mid-stroke
       clearStrokePreview();
       clearHighlight();

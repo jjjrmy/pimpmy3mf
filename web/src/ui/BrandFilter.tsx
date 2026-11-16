@@ -28,7 +28,12 @@ export function BrandFilter({ brands, pinned, selected, onChange, onResetDefault
     const onDown = (e: PointerEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    // preventDefault: closing the menu shouldn't also exit the active viewport tool
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      setOpen(false);
+    };
     const onMove = () => place();
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey);

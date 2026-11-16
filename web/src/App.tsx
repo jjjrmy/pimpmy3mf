@@ -165,6 +165,15 @@ interface MateState {
 }
 const MATE_START: MateState = { step: 'pickMoving', moving: null, target: null, offset: 0, flip: false, angle: 0, slide: [0, 0] };
 const wrapDeg = (a: number) => ((((a + 180) % 360) + 360) % 360) - 180;
+
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'range', 'button', 'submit', 'reset', 'color', 'file']);
+/** Esc in a text / number box belongs to that box (it reverts the draft), not to the viewport tools. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el?.tagName) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  return el.tagName === 'INPUT' && !NON_TEXT_INPUTS.has((el as HTMLInputElement).type);
+}
 const MOVING_COLOR = '#ff8a1f';
 const TARGET_COLOR = '#36d6ff';
 
@@ -334,13 +343,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelToken]);
 
-  // Esc exits the active tool (the paint popover eats Esc first while it is open)
+  // Esc steps out: a pending mate is cancelled first, the next press exits the tool. A brush stroke or gizmo
+  // drag in progress is cancelled by Viewer3D (it stops the event); open menus claim it via preventDefault.
+  const escRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setActiveTool(null);
-        setMate(null);
-      }
+      if (e.key !== 'Escape' || e.defaultPrevented || isTypingTarget(e.target)) return;
+      escRef.current();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -505,7 +514,11 @@ export default function App() {
     if (tool === 'texture') setTab('texture');
     // mates are solved in assembly space even while the assembly is laid on a face (picks are mapped back)
     if (tool === 'assemble') setMate({ ...MATE_START });
-    else setMate(null);
+    else {
+      // leaving Assemble drops the file selection (and with it the gizmo); the assembly and its undo stay
+      setMate(null);
+      setMovingItemId(null);
+    }
   };
 
   const onRemoveFace = (id: string) => patchParams({ paintedFaces: params.paintedFaces.filter((f) => f.id !== id) });
@@ -1187,6 +1200,16 @@ export default function App() {
     await commitPlacement(item.itemId, next, "Couldn't apply the mate");
   };
   const onMateCancel = () => setMate((m) => (m ? { ...MATE_START } : m));
+  /** Done / ✕: leave Assemble. Applied mates and moves stay; a mate set up but not applied is discarded. */
+  const onAssembleDone = () => {
+    const discarded = mate?.step === 'preview';
+    onToolChange(null);
+    if (discarded) toast({ kind: 'info', title: 'Unapplied mate discarded', message: 'Your applied changes are kept.' });
+  };
+  escRef.current = () => {
+    if (activeTool === 'assemble' && mate && mate.step !== 'pickMoving') onMateCancel();
+    else if (activeTool) onToolChange(null);
+  };
 
   // fewer than two files: nothing to assemble
   useEffect(() => {
@@ -1338,6 +1361,12 @@ export default function App() {
     return { itemId: it.itemId, fileName: it.fileName, parts: it.parts, triangles: it.triangles, hidden: keys.length > 0 && keys.every((k) => hiddenParts.has(k)) };
   });
   const onSelectFile = (itemId: string) => {
+    // the selected file's Move button toggles it off (drops the gizmo and any mate started from it)
+    if (itemId === movingItemId) {
+      setMovingItemId(null);
+      onMateCancel();
+      return;
+    }
     setMovingItemId(itemId);
     if (asmItems.length >= 2 && activeTool !== 'assemble') onToolChange('assemble');
   };
@@ -1672,6 +1701,7 @@ export default function App() {
                   onMateParams={(patch) => setMate((m) => (m ? { ...m, ...patch } : m))}
                   onMateApply={onMateApply}
                   onMateCancel={onMateCancel}
+                  onAssembleDone={onAssembleDone}
                   canUndoAssembly={asmHistory.length > 0 && !asmBusy}
                   onUndoAssembly={onUndoAssembly}
                 />

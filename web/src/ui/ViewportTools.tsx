@@ -1,5 +1,6 @@
 // Paint-mode viewport toolbar: Lay-on-face, Paint-face, Texture-face and Assemble tools, plus orientation Undo / Reset.
-// Assemble shows its face-mate panel (flip / offset / rotate, Apply / Cancel, Undo) under the button.
+// Assemble shows its face-mate panel (flip / offset / rotate, Apply / Cancel mate, Undo, Done) under the button.
+// Leaving a tool: click its button again, press Esc (a pending mate / stroke / drag is cancelled first), or Done / ✕.
 // Sits as a small overlay inside the 3D viewport (themed "Pimp My Ride" chips). Purely presentational:
 // the active tool, hover highlighting and picking live in Viewer3D / App. The Texture face tool's settings
 // live in the TEXTURE tab; here it only has the Add / Eraser toggle.
@@ -75,6 +76,8 @@ interface ViewportToolsProps {
   onMateParams: (patch: Partial<Pick<MatePanel, 'offset' | 'flip' | 'angle'>>) => void;
   onMateApply: () => void;
   onMateCancel: () => void;
+  /** Done / ✕: leave the Assemble tool (applied changes stay; an unapplied mate is discarded). */
+  onAssembleDone: () => void;
   canUndoAssembly: boolean;
   onUndoAssembly: () => void;
 }
@@ -106,10 +109,13 @@ export function ViewportTools({
   onMateParams,
   onMateApply,
   onMateCancel,
+  onAssembleDone,
   canUndoAssembly,
   onUndoAssembly,
 }: ViewportToolsProps) {
   const toggle = (tool: ViewportTool) => onToolChange(activeTool === tool ? null : tool);
+  const tip = (tool: ViewportTool, idle: string) => (activeTool === tool ? 'Click again or press Esc to exit' : idle);
+  const matePending = !!mate && mate.step !== 'pickMoving';
   return (
     <div className="viewport-tools" role="toolbar" aria-label="Paint tools">
       <button
@@ -117,7 +123,7 @@ export function ViewportTools({
         className={`vtool${activeTool === 'lay' ? ' is-active' : ''}`}
         onClick={() => toggle('lay')}
         aria-pressed={activeTool === 'lay'}
-        title="Lay a face flat on the bed"
+        title={tip('lay', 'Lay a face flat on the bed')}
       >
         <span className="vtool-icon" aria-hidden>
           <Icon name="lay" />
@@ -129,7 +135,7 @@ export function ViewportTools({
         className={`vtool${activeTool === 'paint' ? ' is-active' : ''}`}
         onClick={() => toggle('paint')}
         aria-pressed={activeTool === 'paint'}
-        title="Paint a face in one color"
+        title={tip('paint', 'Paint a face in one color')}
       >
         <span className="vtool-icon" aria-hidden>
           <Icon name="brush" />
@@ -167,7 +173,7 @@ export function ViewportTools({
         className={`vtool${activeTool === 'texture' ? ' is-active' : ''}`}
         onClick={() => toggle('texture')}
         aria-pressed={activeTool === 'texture'}
-        title="Add a grip texture (real surface relief) to a face"
+        title={tip('texture', 'Add a grip texture (real surface relief) to a face')}
       >
         <span className="vtool-icon" aria-hidden>
           <Icon name="texture" />
@@ -193,7 +199,7 @@ export function ViewportTools({
         onClick={() => toggle('assemble')}
         aria-pressed={activeTool === 'assemble'}
         disabled={!assembleAvailable && activeTool !== 'assemble'}
-        title={assembleAvailable ? 'Mate two files face to face' : 'Add a second model file to assemble'}
+        title={assembleAvailable ? tip('assemble', 'Mate two files face to face') : 'Add a second model file to assemble'}
       >
         <span className="vtool-icon" aria-hidden>
           <Icon name="assemble" />
@@ -201,7 +207,19 @@ export function ViewportTools({
         <span className="vtool-label">Assemble</span>
       </button>
       {activeTool === 'assemble' && mate && (
-        <div className="vtool-panel mate-panel" role="group" aria-label="Face mate">
+        <div className="vtool-panel mate-panel" role="group" aria-label="Assemble">
+          <div className="mate-head">
+            <span className="mate-title">Assemble</span>
+            <button
+              type="button"
+              className="mate-close"
+              onClick={onAssembleDone}
+              aria-label="Exit assemble"
+              title={matePending ? 'Exit assemble (the unapplied mate is discarded)' : 'Exit assemble (Esc)'}
+            >
+              <Icon name="close" />
+            </button>
+          </div>
           <p className="hint tex-hint mate-step">
             {mate.updating ? 'Updating the assembly…' : MATE_HINT[mate.step]}
           </p>
@@ -245,28 +263,41 @@ export function ViewportTools({
                 <button type="button" className="vtool mate-apply" onClick={onMateApply}>
                   Apply
                 </button>
-                <button type="button" className="vtool vtool-mini" onClick={onMateCancel}>
-                  Cancel
+                <button type="button" className="vtool vtool-mini" onClick={onMateCancel} title="Discard this mate and keep assembling (Esc)">
+                  Cancel mate
                 </button>
               </div>
             </div>
           )}
           {mate.step === 'pickTarget' && (
             <div className="vtool-sub mate-actions">
-              <button type="button" className="vtool vtool-mini" onClick={onMateCancel}>
-                Cancel
+              <button type="button" className="vtool vtool-mini" onClick={onMateCancel} title="Discard this mate and keep assembling (Esc)">
+                Cancel mate
               </button>
             </div>
           )}
-          <button
-            type="button"
-            className="vtool vtool-mini mate-undo"
-            onClick={onUndoAssembly}
-            disabled={!canUndoAssembly}
-            title="Undo the last assembly change (Ctrl/Cmd+Z)"
-          >
-            <Icon name="undo" /> Undo
-          </button>
+          <div className="mate-foot">
+            <div className="vtool-sub mate-footer">
+              <button
+                type="button"
+                className="vtool vtool-mini mate-undo"
+                onClick={onUndoAssembly}
+                disabled={!canUndoAssembly}
+                title="Undo the last assembly change (Ctrl/Cmd+Z)"
+              >
+                <Icon name="undo" /> Undo
+              </button>
+              <button
+                type="button"
+                className="pill mate-done"
+                onClick={onAssembleDone}
+                title={matePending ? 'Leave Assemble; the unapplied mate is discarded' : 'Leave Assemble; your changes are kept'}
+              >
+                <Icon name="check" /> Done
+              </button>
+            </div>
+            <p className="hint mate-esc-hint">Esc to cancel · Done to finish</p>
+          </div>
         </div>
       )}
       {paused && activeTool && (

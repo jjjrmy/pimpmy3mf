@@ -34,7 +34,12 @@ function useAnchoredPopover() {
       const t = e.target as Node;
       if (!popRef.current?.contains(t) && !btnRef.current?.contains(t)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    // preventDefault: closing the menu shouldn't also exit the active viewport tool
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      setOpen(false);
+    };
     const onMove = () => place();
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey);

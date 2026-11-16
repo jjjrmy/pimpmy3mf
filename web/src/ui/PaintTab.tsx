@@ -107,7 +107,7 @@ export function PaintTab(props: PaintTabProps) {
                       <button
                         type="button"
                         className={`icon-x asm-btn${moving ? ' is-active' : ''}`}
-                        title="Move this file (Assemble)"
+                        title={moving ? 'Selected: click to deselect' : 'Move this file (Assemble)'}
                         aria-label={`Move ${f.fileName}`}
                         aria-pressed={moving}
                         onClick={() => props.onSelectFile(f.itemId)}
