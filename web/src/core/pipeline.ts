@@ -173,6 +173,7 @@ export function createPipeline(): Pipeline {
   const shellCache = new ShellCache();
   let dKey = ''; let dRegions: ColorRegion[] | null = null; let dBase: Mesh | null = null;
   let dInner: (Uint32Array | null)[][] | null = null;
+  let dInnerMesh: (Mesh | null)[][] | null = null;
 
   const run = async (image: RasterImage, srcModel: Model | null, params: Params, opts?: RunOptions): Promise<Result> => {
     const t0 = performance.now();
@@ -333,13 +334,15 @@ export function createPipeline(): Pipeline {
     const threshold = Number.isFinite(params.insideThreshold) ? params.insideThreshold : DEFAULT_PARAMS.insideThreshold;
     const d3Key = `${e3Key}|${depth ?? 'F'}|${inside ? 'in' : `out:${threshold}`}`;
     if (dKey !== d3Key || !dRegions) {
-      dInner = null;
+      dInner = null; dInnerMesh = null;
       const shelled = geom.mode === 'paint' && model && (depth != null || !inside);
       if (shelled) {
         const set = shellCache.get(model!, depth, inside, threshold)
           ?? await shellCache.build(wasm, model!, depth, inside, threshold, (stage, done, total) => tick(stage, total ? done / total : undefined));
         await tick('shell', 1);
-        dInner = set.inner.some((row) => row.some((r) => !!r)) ? set.inner : null;
+        const anyInner = set.innerMesh.some((row) => row.some((r) => !!r));
+        dInner = anyInner ? set.inner : null;
+        dInnerMesh = anyInner ? set.innerMesh : null;
         // Full with nothing inside: the modifiers stay as they are
         dRegions = depth == null && !dInner ? eRegions! : clipRegionsToShells(wasm, eRegions!, set.shells);
         dBase = null;
@@ -393,6 +396,7 @@ export function createPipeline(): Pipeline {
       faceSkins: sSkins.map((k) => ({ ...k, mesh: cloneMesh(k.mesh)! })),
       depth,
       innerFaces: dInner ? dInner.map((row) => row.map((r) => (r ? r.slice() : null))) : null,
+      innerMeshes: dInnerMesh ? dInnerMesh.map((row) => row.map(cloneMesh)) : null,
       base: cloneMesh(dBase),
       shaped: geom.mode === 'paint' && tChanged && model
         ? model.objects.map((o, j) => o.parts.map((p, k) => (tChanged![j]?.[k] ? cloneMesh(p.mesh) : null)))
@@ -407,7 +411,7 @@ export function createPipeline(): Pipeline {
     qKey = ''; gKey = ''; eKey = '';
     oSrc = null; oModel = null; oOrig = null; oKey = '';
     tIn = null; tSrc = null; tKey = ''; tChanged = null; tApplied = []; tWarn = []; sRegions = null; sSkins = []; sKey = '';
-    shellCache.clear(); dRegions = null; dBase = null; dInner = null; dKey = '';
+    shellCache.clear(); dRegions = null; dBase = null; dInner = null; dInnerMesh = null; dKey = '';
     void gGeom; void gColors;
   };
 

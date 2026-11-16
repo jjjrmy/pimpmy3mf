@@ -304,6 +304,11 @@ export interface Result {
    */
   innerFaces: (Uint32Array | null)[][] | null;
   /**
+   * The same inside surfaces as their own triangle soup per [object][part]: whole inside triangles plus the inside
+   * pieces of triangles split along the smooth inside/outside boundary. Drawn instead of innerFaces when present.
+   */
+  innerMeshes?: (Mesh | null)[][] | null;
+  /**
    * Image mode with a depth: the full-thickness slab (all colors' footprint, z 0..thickness), printed as ONE
    * filament-1 part. regions[0].mesh is then color 1's printed piece (the slab minus the other colors' caps) and
    * regions[k >= 1].mesh is that color's cap (its footprint, z thickness - depth .. thickness), used as a

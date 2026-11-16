@@ -71,16 +71,21 @@ Both use the same algorithm.
   - Without the R2 binding or data (forks, `vite dev`), the picker simply doesn't show.
 - **Pattern rotation and offset** in both modes. The pattern wraps, so nothing is ever left
   uncovered.
-- **Paint depth** in both modes, in the web app and the CLI (`--depth MM`; default full). On a
+- **Paint depth** in both modes, in the web app (default 1 mm) and the CLI (`--depth MM`; default full). On a
   painted model only an outer shell that deep is colored, so the core prints in filament 1. On an
   image tile the colors fill only its top over a one-color base, and it prints as one piece.
   - Only the outside surfaces are colored. Inside surfaces (bores, holes, sealed cavities, recessed
-    mounting pockets) print in filament 1, at a set depth and at Full. A triangle is inside when its
+    mounting pockets) print in filament 1, at a set depth and at Full. A surface is inside when its
     *openness* is under the **What counts as inside** threshold (0.30 deep holes only … 0.90 shallow dips
     too; default 0.70). Openness is the share of cosine-weighted rays from the face that escape or hit the
     part within 3 mm, voxel-marched and smoothed over 1.5 mm, with islands under 20 mm² flipped
     (`src/core/openness.ts`). Finger grooves, open corners and shallow dishes stay outside at the default.
-    The shell then loses a skin under the inside faces (`src/core/plug.ts`; at Full a 2 mm skin).
+    A crease-bounded patch (edges over 30°) that is clearly one-sided takes one label, so the boundary
+    follows a hole's rim crease; where a wall blends into a rim fillet the triangles are split along the
+    smooth openness iso-line instead of following the mesh's triangles.
+    The shell then loses a skin under the inside surface (`src/core/plug.ts`; at Full a 2 mm skin), cut by
+    the level set of "nearer the inside surface than the outside one", so the exported color boundary
+    follows the same curve.
     **Paint inside surfaces** colors them too (`scripts/validate-inner.ts` checks both).
   - The heavy sliders (paint depth, resolution, texture height / pitch / rotation) regenerate when you let
     go. A run stuck behind a long shell or texture build is stopped by replacing the worker.

@@ -60,15 +60,24 @@ const PRINTER_KEY = 'pimpmy3mf.printerId';
 const MATERIAL_KEY = 'pimpmy3mf.material';
 const BRANDS_KEY = 'pimpmy3mf.brands';
 const DEPTH_KEY = 'pimpmy3mf.depth';
+/** Set once the paint-depth default moved from Full to DEFAULT_DEPTH_MM (a stored 'full' before it was the old default). */
+const DEPTH_DEFAULT_V2_KEY = 'pimpmy3mf.depthDefaultV2';
+const DEFAULT_DEPTH_MM = 1;
 const PAINT_INSIDE_KEY = 'pimpmy3mf.paintInside';
 const INSIDE_THRESHOLD_KEY = 'pimpmy3mf.insideThreshold';
 const PATTERN_KEY = 'pimpmy3mf.texturePattern';
 
-/** Saved paint depth: a positive mm value, or null (Full; stored as 'full' or absent). The key predates the
- *  rename from "pattern depth" and stays so saved values carry over. */
+/** Saved paint depth: a positive mm value, or null (Full, stored as 'full'). Absent = DEFAULT_DEPTH_MM. The key
+ *  predates the rename from "pattern depth" and stays so saved values carry over. */
 function loadDepth(): number | null {
   const saved = localStorage.getItem(DEPTH_KEY);
-  if (saved == null || saved === 'full') return null;
+  // one-time move off the old Full default: every visit saved 'full', so a pre-marker 'full' wasn't a choice
+  if (saved == null || (saved === 'full' && localStorage.getItem(DEPTH_DEFAULT_V2_KEY) !== '1')) {
+    localStorage.setItem(DEPTH_DEFAULT_V2_KEY, '1');
+    return DEFAULT_DEPTH_MM;
+  }
+  localStorage.setItem(DEPTH_DEFAULT_V2_KEY, '1');
+  if (saved === 'full') return null;
   const v = parseFloat(saved);
   return Number.isFinite(v) && v > 0 ? v : null;
 }

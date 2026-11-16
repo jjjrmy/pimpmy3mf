@@ -668,10 +668,14 @@ export function Viewer3D({
       result.innerFaces?.forEach((row, j) => {
         row.forEach((tris, k) => {
           const p = result.model!.objects[j]?.parts[k];
-          if (!tris || !p) return;
+          // the inside surface split along the smooth boundary, when the result carries it
+          const split = result.innerMeshes?.[j]?.[k] ?? null;
+          if ((!tris && !split) || !p) return;
           const key = `${j}:${k}`;
           const mesh = new THREE.Mesh(
-            subGeometry(result.shaped?.[j]?.[k] ?? p.mesh, Array.from(tris)),
+            split
+              ? subGeometry(split, Array.from({ length: split.triangles.length / 3 }, (_, i) => i))
+              : subGeometry(result.shaped?.[j]?.[k] ?? p.mesh, Array.from(tris!)),
             new THREE.MeshStandardMaterial({
               color: new THREE.Color(hexes[0] ?? result.regions[0]?.hex ?? '#cccccc'),
               roughness: 0.6,

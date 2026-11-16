@@ -6,14 +6,15 @@
 // count). The outer surface of the shell is the original part, so the visible boundary stays exact.
 //
 // Inside surfaces (bores, cavities, recessed pockets) print in filament 1: openness.ts scores every triangle
-// by how much sky it sees and labels the ones under the "what counts as inside" threshold, and plug.ts builds
-// the solid within reach of those faces (and nearer to them than to any outside face). Subtracting it removes
-// the shell under inside faces while outside faces keep the full depth. At Full depth the shell is the whole
+// by how much sky it sees and labels the ones under the "what counts as inside" threshold (whole crease patches
+// where they're one-sided, otherwise split along a smooth iso-line), and plug.ts builds the solid within reach of
+// that surface (and nearer to it than to the outside surface). Subtracting it removes the shell under inside
+// faces while outside faces keep the full depth; the color boundary follows the label boundary. At Full depth the shell is the whole
 // part minus a FULL_SKIN mm skin under the inside faces. "Paint inside surfaces" skips the labelling.
 import type { ManifoldToplevel, Manifold as ManifoldT } from 'manifold-3d';
 import type { ColorRegion, Mesh, Model } from './types';
 import { meshFromManifold } from './extrude';
-import { meshOpenness, hasOpenness, insideMask } from './openness';
+import { meshOpenness, hasOpenness, insideAt, insideLabels, insideSurface, type InsideLabels } from './openness';
 import { insideSkin, nearField } from './plug';
 
 const MAX_ERODE_TRIS = 20_000;
@@ -86,14 +87,23 @@ export interface PartShell {
   shell: Mesh | null;
   /** Indices into the part mesh's triangles that print in filament 1 (inside surfaces). null = none. */
   inner: Uint32Array | null;
+  /** The inside surface itself: whole inside triangles plus the inside pieces of split ones. null = none. */
+  innerMesh: Mesh | null;
+  /** Inside share of each part triangle's area (split triangles in between). null = none. */
+  innerFrac: Float32Array | null;
 }
 
-/** The part's inside-labelled triangles at `threshold` (null = none). */
-export function insideFaces(mesh: Mesh, threshold: number): Uint8Array | null {
+/** The part's inside labels at `threshold` (null = nothing inside). */
+export function insideFaces(mesh: Mesh, threshold: number): InsideLabels | null {
   const t0 = performance.now();
-  const mask = insideMask(meshOpenness(mesh), threshold);
+  const lab = insideLabels(meshOpenness(mesh), threshold);
   shellStats.insideMs += performance.now() - t0;
-  return mask.some((m) => m === 1) ? mask : null;
+  return lab.tri.some((m) => m !== 0) ? lab : null;
+}
+
+/** Inside share of each triangle's area at `threshold` (scripts: agreement with reference labels). */
+export function insideFraction(mesh: Mesh, threshold: number): Float32Array {
+  return insideLabels(meshOpenness(mesh), threshold).frac;
 }
 
 /**
@@ -108,18 +118,22 @@ export function partShell(wasm: ManifoldToplevel, mesh: Mesh, x: number, paintIn
 export function partShellInfo(
   wasm: ManifoldToplevel, mesh: Mesh, x: number | null, paintInside = false, threshold = DEFAULT_INSIDE_THRESHOLD,
 ): PartShell {
-  const mask = paintInside ? null : insideFaces(mesh, threshold);
+  const lab = paintInside ? null : insideFaces(mesh, threshold);
   const base = x == null ? { shell: mesh, tol: 0 } : erodedShell(wasm, mesh, x);
-  if (!mask || !base.shell) return { shell: base.shell, inner: null };
+  if (!lab || !base.shell) return { shell: base.shell, inner: null, innerMesh: null, innerFrac: null };
   const inner: number[] = [];
-  for (let f = 0; f < mask.length; f++) if (mask[f]) inner.push(f);
+  for (let f = 0; f < lab.tri.length; f++) if (lab.tri[f] === 1) inner.push(f);
   const t0 = performance.now();
+  const o = meshOpenness(mesh);
+  const innerMesh = insideSurface(mesh, o, lab);
   const reach = x == null ? FULL_SKIN : x + base.tol;
   let field = nearField(mesh, Math.max(reach + 1, FULL_SKIN + 1.5));
-  // the level set sits within about a cell of the true distance: one cell of margin covers the whole shell
+  // the skin's inner limit sits within about a cell of the true distance: one cell of margin covers the shell
   const r = x == null ? FULL_SKIN + field.h / 2 : reach + field.h;
   if (r > field.radius) field = nearField(mesh, r);
-  const skin = insideSkin(wasm, field, mask, r);
+  const sIn = new Uint8Array(field.sTri.length);
+  for (let s = 0; s < sIn.length; s++) sIn[s] = insideAt(o, lab, field.sTri[s], field.sU[s], field.sV[s]) ? 1 : 0;
+  const skin = insideSkin(wasm, field, sIn, r);
   let out: Mesh | null = base.shell;
   if (skin) {
     const sh = meshToManifold(wasm, base.shell);
@@ -128,7 +142,7 @@ export function partShellInfo(
     cut.delete(); sh.delete(); skin.delete();
   }
   shellStats.skinMs += performance.now() - t0;
-  return { shell: out, inner: Uint32Array.from(inner) };
+  return { shell: out, inner: Uint32Array.from(inner), innerMesh, innerFrac: lab.frac };
 }
 
 /** How many (depth, inside) settings stay cached per model, so stepping back to a recent one is instant. */
@@ -138,6 +152,7 @@ const SHELL_CACHE_SIZE = 4;
 export interface ShellSet {
   shells: (Mesh | null)[][];
   inner: (Uint32Array | null)[][];
+  innerMesh: (Mesh | null)[][];
 }
 
 type ShellProgress = (stage: 'inside' | 'shell', done: number, total: number) => Promise<void>;
@@ -171,20 +186,23 @@ export class ShellCache {
     shellStats.erodeTris = []; shellStats.insideMs = 0; shellStats.skinMs = 0; shellStats.erodeMs = 0;
     const total = model.objects.reduce((s, o) => s + o.parts.length, 0);
     let done = 0;
-    const set: ShellSet = { shells: [], inner: [] };
+    const set: ShellSet = { shells: [], inner: [], innerMesh: [] };
     for (const obj of model.objects) {
       const row: (Mesh | null)[] = [];
       const innerRow: (Uint32Array | null)[] = [];
+      const meshRow: (Mesh | null)[] = [];
       for (const p of obj.parts) {
         if (onProgress && !paintInside && !hasOpenness(p.mesh)) await onProgress('inside', done, total);
         if (onProgress) await onProgress('shell', done, total);
         const info = partShellInfo(wasm, p.mesh, x, paintInside, threshold);
         row.push(info.shell);
         innerRow.push(info.inner);
+        meshRow.push(info.innerMesh);
         done++;
       }
       set.shells.push(row);
       set.inner.push(innerRow);
+      set.innerMesh.push(meshRow);
     }
     shellStats.ms = performance.now() - t0; shellStats.parts = total;
     if (this.model !== model) { this.model = model; this.entries.clear(); }

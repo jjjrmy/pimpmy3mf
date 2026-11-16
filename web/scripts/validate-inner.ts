@@ -5,8 +5,10 @@
 // REAL pipeline + writeBambuProject through the Bambu CLIs, then read one mid layer of G-code: the wall
 // perimeters around the hole must be filament 1 only, while the outer walls carry several colors.
 //
-// "areas" scores which surfaces count as inside (openness < threshold) on test shapes and the private grip
-// fixture at thresholds 0.30 / 0.70 / 0.90, with acceptance checks at the default.
+// "areas" scores which surfaces count as inside (openness < threshold, area-weighted with split triangles) on
+// test shapes and the private grip fixture at thresholds 0.30 / 0.70 / 0.90, with acceptance checks at the default.
+// The grip slice (depth 1 mm) maps every outer-wall move of every layer back onto the grip's surface: walls on the
+// bore, the mount channel and its holes must be filament 1 only, walls on the outer grip must carry the camo.
 //
 //   bun scripts/validate-inner.ts             # probes + areas + every slice case
 //   bun scripts/validate-inner.ts probes      # shell probes only
@@ -22,7 +24,8 @@ import { initManifold } from '../src/core/manifold';
 import { createPipeline } from '../src/core/pipeline';
 import { objectsFromResult, writeBambuProject } from '../src/core/threemf';
 import { meshToManifold, partShell, shellStats } from '../src/core/shell';
-import { computeOpenness, insideMask } from '../src/core/openness';
+import { computeOpenness, insideLabels } from '../src/core/openness';
+import { nearField } from '../src/core/plug';
 import { loadModel } from '../src/core/meshio';
 import { DEFAULT_PARAMS } from '../src/core/types';
 import type { Mesh, Model, Params, RasterImage, RGB } from '../src/core/types';
@@ -224,7 +227,7 @@ function triInfo(mesh: Mesh) {
   }
   return { c, area };
 }
-const pctOf = (mask: Uint8Array, area: Float32Array, pick?: (f: number) => boolean) => {
+const pctOf = (mask: ArrayLike<number>, area: Float32Array, pick?: (f: number) => boolean) => {
   let a = 0, s = 0;
   for (let f = 0; f < mask.length; f++) { if (pick && !pick(f)) continue; s += area[f]; if (mask[f]) a += area[f]; }
   return { pct: s ? (a / s) * 100 : 0, area: s };
@@ -240,13 +243,13 @@ if (want('areas')) {
     const mesh = model.objects[0].parts[0].mesh;
     const o = computeOpenness(mesh);
     const { c, area } = triInfo(mesh);
-    const masks = THRESHOLDS.map((t) => insideMask(o, t));
+    const masks = THRESHOLDS.map((t) => insideLabels(o, t).frac);
     const total = masks.map((m) => pctOf(m, area).pct.toFixed(1)).join(' / ');
     const sel = ac.feature ? (f: number) => ac.feature!.sel(c[f * 4], c[f * 4 + 1], c[f * 4 + 2], c[f * 4 + 3]) : undefined;
     const feat = sel ? `${ac.feature!.name}: ${masks.map((m) => pctOf(m, area, sel).pct.toFixed(1)).join(' / ')}` : '-';
     console.log(`  | ${ac.name} | ${mesh.triangles.length / 3} | ${o.stats.ms.toFixed(0)} | ${total} | ${feat} |`);
     if (sel && ac.expect != null) {
-      const m = insideMask(o, DEFAULT_T);
+      const m = insideLabels(o, DEFAULT_T).frac;
       const p = pctOf(m, area, sel);
       if (p.area <= 0) fail(`${ac.name}: no ${ac.feature!.name} faces selected`);
       else if (ac.expect ? p.pct >= 95 : p.pct <= 2) ok(`${ac.name}: ${ac.feature!.name} ${p.pct.toFixed(1)}% inside at ${DEFAULT_T} (${ac.expect ? 'inside' : 'painted'})`);
@@ -259,7 +262,7 @@ if (want('areas')) {
       if (!existsSync(segPath)) { console.log('  skip grip acceptance: no segments file'); continue; }
       const seg = new Int32Array(readFileSync(segPath).buffer.slice(0));
       if (seg.length !== mesh.triangles.length / 3) { fail(`grip segments: ${seg.length} labels for ${mesh.triangles.length / 3} triangles`); continue; }
-      const m = insideMask(o, DEFAULT_T);
+      const m = insideLabels(o, DEFAULT_T).frac;
       const share = (ids: number[]) => pctOf(m, area, (f) => ids.includes(seg[f]));
       const checks: [string, number[], (p: number) => boolean, string][] = [
         // seg 11 also holds the outer bottom rim (about 30% of it), which stays painted
@@ -378,10 +381,91 @@ function wallTools(layer: LayerInfo, isHole: (mx: number, my: number) => boolean
 }
 const fmt = (m: Map<number, number>) => [...m.entries()].sort((a, b) => a[0] - b[0]).map(([t, n]) => `T${t}:${n}`).join(' ') || '-';
 
+/**
+ * Grip: map wall moves (outer wall feature, every layer) back to the nearest grip surface sample (within 0.8 mm
+ * in 3D, G-code XY/Z shifted so the wall bbox matches the part's). Hole side = a sample on the bore (seg 11 inside
+ * label), mount channel walls / floor / end face (4, 6, 9, 129), channel screw hole (128) or through-hole (8),
+ * at least 2 mm from any outside-labelled sample; outside = outer grip (12, 16) at least 2 mm from inside ones.
+ */
+function gripWalls(g: Gcode, mesh: Mesh) {
+  const seg = new Int32Array(readFileSync(GRIP.replace(/\.stl$/, '.segments.bin')).buffer.slice(0));
+  const frac = insideLabels(computeOpenness(mesh), DEFAULT_T).frac;
+  const F = nearField(mesh, 3);
+  const n = F.sTri.length;
+  // per sample: 1 = hole side, 0 = outer grip, -1 = neither / near the boundary
+  const lab = new Int8Array(n);
+  const isIn = new Uint8Array(n);
+  for (let s = 0; s < n; s++) {
+    const f = F.sTri[s];
+    // split triangles count as inside where the sample is (it's ≥ 2 mm from outside samples below anyway)
+    isIn[s] = frac[f] > 0 ? 1 : 0;
+  }
+  const key = (x: number, y: number, z: number) => `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+  const hash = new Map<string, number[]>();
+  for (let s = 0; s < n; s++) {
+    const k = key(F.sp[s * 3], F.sp[s * 3 + 1], F.sp[s * 3 + 2]);
+    const l = hash.get(k); if (l) l.push(s); else hash.set(k, [s]);
+  }
+  const near = (x: number, y: number, z: number, r: number, pick: (s: number) => boolean): number => {
+    let best = -1, bd = r * r;
+    const R = Math.ceil(r);
+    for (let i = -R; i <= R; i++) for (let j = -R; j <= R; j++) for (let k = -R; k <= R; k++) {
+      const l = hash.get(key(x + i, y + j, z + k)); if (!l) continue;
+      for (const s of l) {
+        if (!pick(s)) continue;
+        const d = (F.sp[s * 3] - x) ** 2 + (F.sp[s * 3 + 1] - y) ** 2 + (F.sp[s * 3 + 2] - z) ** 2;
+        if (d < bd) { bd = d; best = s; }
+      }
+    }
+    return best;
+  };
+  const holeSeg = new Set([4, 6, 9, 129, 128, 8]);
+  for (let s = 0; s < n; s++) {
+    const sg = seg[F.sTri[s]];
+    lab[s] = (holeSeg.has(sg) || sg === 11) && isIn[s] ? 1 : (sg === 12 || sg === 16) && !isIn[s] ? 0 : -1;
+  }
+  // part bbox vs the wall bbox of the whole print
+  const v = mesh.vertices;
+  let mx = Infinity, my = Infinity, mz = Infinity;
+  for (let i = 0; i < v.length; i += 3) { mx = Math.min(mx, v[i]); my = Math.min(my, v[i + 1]); mz = Math.min(mz, v[i + 2]); }
+  let gx = Infinity, gy = Infinity;
+  for (const L of g.layers) for (const m of L.moves) if (WALL.test(m[5])) { gx = Math.min(gx, m[0], m[2]); gy = Math.min(gy, m[1], m[3]); }
+  const hole = new Map<number, number>(), outside = new Map<number, number>();
+  const stray: string[] = [];
+  for (const L of g.layers) {
+    // G-code Z is the top of the layer; the wall sits about half a layer lower
+    const z = L.z - 0.1 + mz;
+    for (const m of L.moves) {
+      if (!/outer wall/i.test(m[5])) continue;
+      // judge both ends and the midpoint (arc-fitted walls are read as straight chords that cut into the part)
+      let side = -2, s = -1, x = 0, y = 0;
+      for (const w of [0, 0.5, 1]) {
+        const px = m[0] + w * (m[2] - m[0]) - gx + mx, py = m[1] + w * (m[3] - m[1]) - gy + my;
+        const q = near(px, py, z, 0.8, () => true);
+        const l = q < 0 ? -1 : lab[q];
+        // keep away from the label boundary: no sample of the other side within 2 mm
+        const other = l === 1 ? (r: number) => !isIn[r] : (r: number) => !!isIn[r];
+        const sd = l < 0 || near(px, py, z, 2, other) >= 0 ? -1 : l;
+        if (side === -2) { side = sd; s = q; x = px; y = py; } else if (side !== sd) side = -1;
+      }
+      if (side < 0) continue;
+      const bucket = lab[s] === 1 ? hole : outside;
+      bucket.set(m[4], (bucket.get(m[4]) ?? 0) + 1);
+      if (lab[s] === 1 && m[4] !== 0 && stray.length < 5) {
+        stray.push(`T${m[4]} at part (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(2)}) seg ${seg[F.sTri[s]]}, ${Math.hypot(m[2] - m[0], m[3] - m[1]).toFixed(2)} mm long`);
+      }
+    }
+  }
+  if (stray.length) console.log(`  stray hole-side moves: ${stray.join('; ')}`);
+  return { hole, outside };
+}
+
 interface Case {
   tag: string; label: string; model: () => Model | null; params: Params; layerZ: number;
   /** null = only check the slice succeeds and every filament prints (no known hole layout). */
   isHole: ((mx: number, my: number) => boolean | null) | null;
+  /** Instead of isHole: classify the whole print's walls (the grip). */
+  walls?: (g: Gcode, model: Model) => { hole: Map<number, number>; outside: Map<number, number> };
   /** true = hole walls must be filament 1 only; false = they must carry several colors ("paint inside" on). */
   holeBase: boolean;
 }
@@ -416,7 +500,10 @@ const cases: Case[] = [
   { tag: 'blind', label: 'box with a blind hole in the front face, planar front, depth 0.6', model: () => asModel('blind', blindBox()), params: P({ axis: 'y' }), layerZ: 15, isHole: blindHole, holeBase: true },
   { tag: 'inside', label: 'tube standing, planar front, depth 0.6, paint inside surfaces ON', model: () => asModel('tubeZ', tubeZ()), params: P({ axis: 'y', paintInside: true }), layerZ: 30, isHole: tubeHole, holeBase: false },
   { tag: 'tubeFull', label: 'tube standing, planar front, Full depth (inside skin only)', model: () => asModel('tubeZ', tubeZ()), params: P({ axis: 'y', depth: null }), layerZ: 30, isHole: tubeFullHole, holeBase: true },
-  { tag: 'grip', label: 'tailgunner grip (private), planar front, depth 0.6, default inside threshold', model: gripModel, params: P({ axis: 'y' }), layerZ: 0, isHole: null, holeBase: true },
+  {
+    tag: 'grip', label: 'tailgunner grip (private), planar front, depth 1 mm, default inside threshold', model: gripModel, params: P({ axis: 'y', depth: 1 }),
+    layerZ: 0, isHole: null, holeBase: true, walls: (g, m) => gripWalls(g, m.objects[0].parts[0].mesh),
+  },
 ];
 
 const stripes = stripeImage();
@@ -447,6 +534,16 @@ for (const c of cases.filter((c) => want(c.tag))) {
     }
     const missing = [0, 1, 2].filter((t) => !s.gcode!.extrudePerTool.get(t));
     if (missing.length) fail(`${label}: no extrusion on T${missing.join(',T')}`);
+    if (c.walls) {
+      const { hole, outside } = c.walls(s.gcode, model);
+      const detail = `all layers, outer-wall moves on bore / channel / holes ${fmt(hole)} | on the outer grip ${fmt(outside)}`;
+      const holeTools = [...hole.keys()], outTools = [...outside.keys()];
+      if (!holeTools.length || !outTools.length) fail(`${label}: couldn't find both wall groups (${detail})`);
+      else if (outTools.length < 2) fail(`${label}: outer grip walls show only ${fmt(outside)} (${detail})`);
+      else if (!(holeTools.length === 1 && holeTools[0] === 0)) fail(`${label}: hole walls not filament 1 only (${detail})`);
+      else ok(`${label}: exit 0, ${(s.ms / 1000).toFixed(0)}s, ${detail}`);
+      continue;
+    }
     if (!c.isHole) {
       if (!missing.length) ok(`${label}: exit 0, ${(s.ms / 1000).toFixed(0)}s, extrusion on ${fmt(s.gcode.extrudePerTool)}`);
       continue;

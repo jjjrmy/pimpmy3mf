@@ -7,6 +7,12 @@
 // openness = open / K, area-smoothed over SMOOTH_R mm among samples whose normals agree, per triangle.
 // inside(f) = openness(f) < threshold, then islands under ISLAND_AREA mm² are flipped.
 //
+// Clean boundaries: the part is cut into crease-bounded patches (dihedral over CREASE_DEG). A patch that is
+// clearly one-sided at the threshold takes one label, so the boundary snaps to its rim crease. In a patch that
+// really is mixed (a hole wall that blends into a rim fillet) every triangle corner carries its own smoothed
+// openness (per vertex and patch, so shared corners agree) and triangles that straddle the threshold are split
+// along the linear iso-line: the boundary is a smooth curve instead of triangle sawteeth.
+//
 // Samples are bucketed by (grid cell × one of 42 normal directions): each bucket is ray-cast once.
 // The score is cached per mesh object, so moving the threshold only re-runs the cheap labelling.
 import type { Mesh } from './types';
@@ -23,6 +29,12 @@ const SAMPLE_EDGE = 3;
 const MAX_SPLIT = 8;
 /** Occupancy cells (1 mm, coarsened for big parts so the grid stays under this). */
 const MAX_CELLS = 4_000_000;
+/** Edges sharper than this (degrees) bound the patches. */
+const CREASE_DEG = 30;
+/** A patch whose minority label covers at most this share of its area takes the majority label. */
+const PATCH_ONE_SIDED = 0.1;
+/** Neighbour-averaging passes over the corner openness. */
+const CORNER_SMOOTH_PASSES = 4;
 
 export interface Openness {
   /** Smoothed openness per triangle, 0 (enclosed) .. 1 (open sky). */
@@ -32,6 +44,11 @@ export interface Openness {
   /** Edge adjacency, CSR: neighbours of t are adj[adjStart[t] .. adjStart[t + 1]). */
   adjStart: Uint32Array;
   adj: Uint32Array;
+  /** Crease-bounded patch id per triangle, and patch areas (mm²). */
+  patch: Int32Array;
+  patchArea: Float64Array;
+  /** Smoothed openness at each triangle corner (3 per triangle), shared by corners on one vertex and patch. */
+  corner: Float32Array;
   /** Timings (ms) and sizes of the computation, for scripts. */
   stats: { ms: number; grid: number; voxel: number; samples: number; buckets: number; rays: number };
 }
@@ -316,27 +333,113 @@ export function computeOpenness(mesh: Mesh, opts?: { rays?: number; h?: number }
   }
   for (let f = 0; f < nTri; f++) if (wsum[f] > 0) score[f] = acc[f] / wsum[f];
 
-  const { adjStart, adj } = triAdjacency(mesh);
+  const { adjStart, adj, weld, patch, patchArea } = triAdjacency(mesh, triNormal);
+
+  // corner openness: per (welded vertex, patch), the smoothed openness around the vertex among buckets whose
+  // normals agree with the patch's normal there. Where every incident triangle is small its (already smoothed)
+  // score says the same, so the area-weighted mean of those scores stands in for the bucket query.
+  let nW = 0;
+  for (let i = 0; i < weld.length; i++) if (weld[i] >= nW) nW = weld[i] + 1;
+  const firstKey = new Int32Array(nW).fill(-1);
+  const cap = nTri * 3;
+  const nextKey = new Int32Array(cap), kPatch = new Int32Array(cap), kPos = new Int32Array(cap), kBig = new Uint8Array(cap);
+  const kNx = new Float64Array(cap), kNy = new Float64Array(cap), kNz = new Float64Array(cap), kFb = new Float64Array(cap), kFw = new Float64Array(cap);
+  let nKey = 0;
+  const cornerKey = new Int32Array(nTri * 3);
+  for (let f = 0; f < nTri; f++) {
+    const a = t[f * 3] * 3, b = t[f * 3 + 1] * 3, c = t[f * 3 + 2] * 3;
+    const big = Math.max(
+      Math.hypot(v[b] - v[a], v[b + 1] - v[a + 1], v[b + 2] - v[a + 2]),
+      Math.hypot(v[c] - v[a], v[c + 1] - v[a + 1], v[c + 2] - v[a + 2]),
+      Math.hypot(v[c] - v[b], v[c + 1] - v[b + 1], v[c + 2] - v[b + 2])) > SMOOTH_R;
+    for (let cn = 0; cn < 3; cn++) {
+      const vi = t[f * 3 + cn], w = weld[vi], pf = patch[f];
+      let k = firstKey[w];
+      while (k >= 0 && kPatch[k] !== pf) k = nextKey[k];
+      if (k < 0) {
+        k = nKey++; nextKey[k] = firstKey[w]; firstKey[w] = k; kPatch[k] = pf; kPos[k] = vi;
+      }
+      cornerKey[f * 3 + cn] = k;
+      kNx[k] += triNormal[f * 3] * area[f]; kNy[k] += triNormal[f * 3 + 1] * area[f]; kNz[k] += triNormal[f * 3 + 2] * area[f];
+      kFb[k] += score[f] * area[f]; kFw[k] += area[f];
+      if (big) kBig[k] = 1;
+    }
+  }
+  const kVal = new Float32Array(nKey);
+  for (let k = 0; k < nKey; k++) {
+    const fallback = kFw[k] > 0 ? kFb[k] / kFw[k] : 1;
+    if (!kBig[k]) { kVal[k] = fallback; continue; }
+    const px = v[kPos[k] * 3], py = v[kPos[k] * 3 + 1], pz = v[kPos[k] * 3 + 2];
+    const l = Math.hypot(kNx[k], kNy[k], kNz[k]) || 1;
+    const qx = kNx[k] / l, qy = kNy[k] / l, qz = kNz[k] / l;
+    const ci = Math.floor(px / cs), cj = Math.floor(py / cs), ck = Math.floor(pz / cs);
+    let sw = 0, s = 0;
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) for (let dk = -1; dk <= 1; dk++) {
+      const lst = hash.get(hk(ci + di, cj + dj, ck + dk));
+      if (!lst) continue;
+      for (const p of lst) {
+        const ddx = bCx[p] - px, ddy = bCy[p] - py, ddz = bCz[p] - pz;
+        if (ddx * ddx + ddy * ddy + ddz * ddz > r2) continue;
+        if (bnx[p] * qx + bny[p] * qy + bnz[p] * qz <= SMOOTH_DOT) continue;
+        sw += bArea[p]; s += bArea[p] * raw[p];
+      }
+    }
+    kVal[k] = sw > 0 ? s / sw : fallback;
+  }
+  smoothCorners(kVal, cornerKey, nTri);
+  const corner = new Float32Array(nTri * 3);
+  for (let i = 0; i < nTri * 3; i++) corner[i] = kVal[cornerKey[i]];
+
   const ms = performance.now() - t0;
   return {
-    score, area, adjStart, adj,
+    score, area, adjStart, adj, patch, patchArea, corner,
     stats: { ms, grid: tGrid, voxel: h, samples: sampTri.length, buckets: nB, rays: tRay },
   };
 }
 
-/** Triangle edge adjacency over welded vertex positions (unwelded soup still connects). */
-function triAdjacency(mesh: Mesh): { adjStart: Uint32Array; adj: Uint32Array } {
+/** A few Jacobi passes of neighbour averaging over the corner keys (vertex, patch) joined by triangle edges, so
+ *  ray noise doesn't wiggle the iso-line. Keys never mix across patches. */
+function smoothCorners(val: Float32Array, cornerKey: Int32Array, nTri: number): void {
+  const n = val.length;
+  const deg = new Uint32Array(n + 1);
+  for (let f = 0; f < nTri; f++) for (let c = 0; c < 3; c++) deg[cornerKey[f * 3 + c]] += 2;
+  const start = new Uint32Array(n + 1);
+  for (let k = 0; k < n; k++) start[k + 1] = start[k] + deg[k];
+  const nb = new Int32Array(start[n]);
+  const fill = start.slice(0, n);
+  for (let f = 0; f < nTri; f++) for (let c = 0; c < 3; c++) {
+    const k = cornerKey[f * 3 + c];
+    nb[fill[k]++] = cornerKey[f * 3 + ((c + 1) % 3)];
+    nb[fill[k]++] = cornerKey[f * 3 + ((c + 2) % 3)];
+  }
+  const tmp = new Float32Array(n);
+  for (let it = 0; it < CORNER_SMOOTH_PASSES; it++) {
+    for (let k = 0; k < n; k++) {
+      let s = 0;
+      const e = start[k + 1];
+      for (let i = start[k]; i < e; i++) s += val[nb[i]];
+      tmp[k] = e > start[k] ? 0.5 * val[k] + (0.5 * s) / (e - start[k]) : val[k];
+    }
+    val.set(tmp);
+  }
+}
+
+/** Triangle edge adjacency over welded vertex positions (unwelded soup still connects), the welded vertex id of
+ *  every vertex, and crease-bounded patches (union of triangles across manifold edges flatter than CREASE_DEG). */
+function triAdjacency(mesh: Mesh, triNormal: Float32Array): {
+  adjStart: Uint32Array; adj: Uint32Array; weld: Uint32Array; patch: Int32Array; patchArea: Float64Array;
+} {
   const v = mesh.vertices, t = mesh.triangles;
   const nTri = t.length / 3;
-  const weld = new Map<string, number>();
+  const weldMap = new Map<string, number>();
   const id = new Uint32Array(v.length / 3);
   for (let i = 0; i < id.length; i++) {
     const key = `${Math.round(v[i * 3] * 1e4)},${Math.round(v[i * 3 + 1] * 1e4)},${Math.round(v[i * 3 + 2] * 1e4)}`;
-    let w = weld.get(key);
-    if (w === undefined) { w = weld.size; weld.set(key, w); }
+    let w = weldMap.get(key);
+    if (w === undefined) { w = weldMap.size; weldMap.set(key, w); }
     id[i] = w;
   }
-  const nv = weld.size;
+  const nv = weldMap.size;
   const edges = new Map<number, number[]>();
   for (let f = 0; f < nTri; f++) {
     for (let e = 0; e < 3; e++) {
@@ -353,11 +456,32 @@ function triAdjacency(mesh: Mesh): { adjStart: Uint32Array; adj: Uint32Array } {
   for (let f = 0; f < nTri; f++) adjStart[f + 1] = adjStart[f] + deg[f];
   const adj = new Uint32Array(adjStart[nTri]);
   const fill = adjStart.slice(0, nTri);
+  const parent = new Int32Array(nTri);
+  for (let f = 0; f < nTri; f++) parent[f] = f;
+  const find = (x: number) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const cosCrease = Math.cos((CREASE_DEG * Math.PI) / 180);
   for (const l of edges.values()) {
     if (l.length < 2) continue;
     for (const f of l) for (const g of l) if (g !== f) adj[fill[f]++] = g;
+    if (l.length !== 2) continue;
+    const f = l[0], g = l[1];
+    const d = triNormal[f * 3] * triNormal[g * 3] + triNormal[f * 3 + 1] * triNormal[g * 3 + 1] + triNormal[f * 3 + 2] * triNormal[g * 3 + 2];
+    if (d >= cosCrease) { const a = find(f), b = find(g); if (a !== b) parent[a] = b; }
   }
-  return { adjStart, adj };
+  const patch = new Int32Array(nTri);
+  const rootId = new Map<number, number>();
+  const areas: number[] = [];
+  for (let f = 0; f < nTri; f++) {
+    const r = find(f);
+    let p = rootId.get(r);
+    if (p === undefined) { p = areas.length; rootId.set(r, p); areas.push(0); }
+    patch[f] = p;
+    const a = t[f * 3] * 3, b = t[f * 3 + 1] * 3, c = t[f * 3 + 2] * 3;
+    const ux = v[b] - v[a], uy = v[b + 1] - v[a + 1], uz = v[b + 2] - v[a + 2];
+    const wx = v[c] - v[a], wy = v[c + 1] - v[a + 1], wz = v[c + 2] - v[a + 2];
+    areas[p] += Math.hypot(uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx) / 2;
+  }
+  return { adjStart, adj, weld: id, patch, patchArea: Float64Array.from(areas) };
 }
 
 /** Flip connected components of `label === which` smaller than `minArea` that border the other label. */
@@ -384,14 +508,103 @@ function flipIslands(o: Openness, label: Uint8Array, which: number, minArea: num
   }
 }
 
-/** Inside mask (1 = inside) of the scored triangles at `threshold`, small islands flipped. */
-export function insideMask(o: Openness, threshold: number): Uint8Array {
+/** Per-triangle labels at a threshold: 0 = outside, 1 = inside, 2 = split along the corner iso-line. */
+export interface InsideLabels {
+  threshold: number;
+  tri: Uint8Array;
+  /** Inside share of each triangle's area (0 / 1, or the split fraction). */
+  frac: Float32Array;
+}
+
+/** Inside part of a triangle whose corners carry values `c0..c2` (linear over it): the polygon of
+ *  barycentric points (weights of corners 1 and 2) where the value is below `t`. [] when none. */
+export function belowPolygon(c0: number, c1: number, c2: number, t: number): [number, number][] {
+  const P: [number, number][] = [[0, 0], [1, 0], [0, 1]];
+  const val = [c0, c1, c2];
+  const out: [number, number][] = [];
+  for (let i = 0; i < 3; i++) {
+    const j = (i + 1) % 3;
+    const a = val[i] < t, b = val[j] < t;
+    if (a) out.push(P[i]);
+    if (a !== b) {
+      const s = (t - val[i]) / (val[j] - val[i]);
+      out.push([P[i][0] + s * (P[j][0] - P[i][0]), P[i][1] + s * (P[j][1] - P[i][1])]);
+    }
+  }
+  return out;
+}
+
+function polyFrac(p: [number, number][]): number {
+  let a = 0;
+  for (let i = 0; i < p.length; i++) { const q = p[(i + 1) % p.length]; a += p[i][0] * q[1] - q[0] * p[i][1]; }
+  return Math.abs(a); // the reference triangle's doubled area is 1
+}
+
+/**
+ * Labels at `threshold`: per-triangle openness with small islands flipped; a crease patch whose minority covers
+ * at most PATCH_ONE_SIDED of it takes its majority label; in mixed patches triangles follow their corners and
+ * the ones that straddle the threshold are split (islands that were flipped keep their flipped label).
+ */
+export function insideLabels(o: Openness, threshold: number): InsideLabels {
   const n = o.score.length;
-  const label = new Uint8Array(n);
-  for (let f = 0; f < n; f++) label[f] = o.score[f] < threshold ? 1 : 0;
-  flipIslands(o, label, 1, ISLAND_AREA);
-  flipIslands(o, label, 0, ISLAND_AREA);
-  return label;
+  const m = new Uint8Array(n);
+  for (let f = 0; f < n; f++) m[f] = o.score[f] < threshold ? 1 : 0;
+  flipIslands(o, m, 1, ISLAND_AREA);
+  flipIslands(o, m, 0, ISLAND_AREA);
+  const inA = new Float64Array(o.patchArea.length);
+  for (let f = 0; f < n; f++) if (m[f]) inA[o.patch[f]] += o.area[f];
+  const tri = new Uint8Array(n);
+  const frac = new Float32Array(n);
+  for (let f = 0; f < n; f++) {
+    const p = o.patch[f], share = o.patchArea[p] > 0 ? inA[p] / o.patchArea[p] : m[f];
+    let l: number;
+    if (share >= 1 - PATCH_ONE_SIDED) l = 1;
+    else if (share <= PATCH_ONE_SIDED) l = 0;
+    else if (m[f] !== (o.score[f] < threshold ? 1 : 0)) l = m[f];
+    else {
+      const c0 = o.corner[f * 3], c1 = o.corner[f * 3 + 1], c2 = o.corner[f * 3 + 2];
+      const below = (c0 < threshold ? 1 : 0) + (c1 < threshold ? 1 : 0) + (c2 < threshold ? 1 : 0);
+      l = below === 3 ? 1 : below === 0 ? 0 : 2;
+      if (l === 2) frac[f] = polyFrac(belowPolygon(c0, c1, c2, threshold));
+    }
+    tri[f] = l;
+    if (l === 1) frac[f] = 1;
+  }
+  return { threshold, tri, frac };
+}
+
+/** Whether barycentric point (u, v) (weights of corners 1, 2) of triangle `f` is inside under `lab`. */
+export function insideAt(o: Openness, lab: InsideLabels, f: number, u: number, v: number): boolean {
+  const l = lab.tri[f];
+  if (l !== 2) return l === 1;
+  return (1 - u - v) * o.corner[f * 3] + u * o.corner[f * 3 + 1] + v * o.corner[f * 3 + 2] < lab.threshold;
+}
+
+/** The inside surface as its own triangle soup: whole inside triangles plus the inside pieces of split ones. */
+export function insideSurface(mesh: Mesh, o: Openness, lab: InsideLabels): Mesh | null {
+  const v = mesh.vertices, t = mesh.triangles;
+  const pos: number[] = [];
+  const put = (f: number, u: number, w: number) => {
+    const a = t[f * 3] * 3, b = t[f * 3 + 1] * 3, c = t[f * 3 + 2] * 3;
+    for (let k = 0; k < 3; k++) pos.push(v[a + k] + u * (v[b + k] - v[a + k]) + w * (v[c + k] - v[a + k]));
+  };
+  for (let f = 0; f < lab.tri.length; f++) {
+    if (lab.tri[f] === 1) { put(f, 0, 0); put(f, 1, 0); put(f, 0, 1); continue; }
+    if (lab.tri[f] !== 2) continue;
+    const poly = belowPolygon(o.corner[f * 3], o.corner[f * 3 + 1], o.corner[f * 3 + 2], lab.threshold);
+    for (let i = 1; i + 1 < poly.length; i++) { put(f, ...poly[0]); put(f, ...poly[i]); put(f, ...poly[i + 1]); }
+  }
+  if (!pos.length) return null;
+  const vertices = Float32Array.from(pos);
+  const triangles = new Uint32Array(vertices.length / 3);
+  for (let i = 0; i < triangles.length; i++) triangles[i] = i;
+  return { vertices, triangles };
+}
+
+/** Inside mask (1 = inside) of the scored triangles at `threshold` (split triangles: inside when at least half). */
+export function insideMask(o: Openness, threshold: number): Uint8Array {
+  const lab = insideLabels(o, threshold);
+  return Uint8Array.from(lab.frac, (x) => (x >= 0.5 ? 1 : 0));
 }
 
 /** Inside fraction of the surface area for a mask. */
