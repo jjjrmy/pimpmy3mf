@@ -70,6 +70,8 @@ interface Viewer3DProps {
   gizmo?: GizmoSpec | null;
   /** A gizmo handle was dragged: `value` is the snapped total since the press (mm or degrees). */
   onGizmo?: (e: GizmoEvent) => void;
+  /** Slowly orbit the camera (paused while the user drags / zooms and while a face tool is active). */
+  spin?: boolean;
 }
 
 /** free: X/Y/Z arrows + rings about X/Y/Z. mate: a ring about the target normal + two in-plane slide arrows. */
@@ -112,6 +114,17 @@ export interface PartMotion {
 }
 
 interface Scene {
+  /** Double-click reset: the camera glides from `from*` to the default framing. */
+  tween?: {
+    fromPos: THREE.Vector3;
+    fromTarget: THREE.Vector3;
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    near: number;
+    far: number;
+    t0: number;
+    dur: number;
+  } | null;
   /** Assemble: moving / target face overlays. */
   mateMeshes?: { mesh: THREE.Mesh; key: string }[];
   /** Assemble: the move / rotate gizmo. */
@@ -328,10 +341,16 @@ export function Viewer3D({
   partMotions,
   gizmo,
   onGizmo,
+  spin = false,
 }: Viewer3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
   const lastFitRef = useRef<string>('');
+  // spin runs only with no face tool active; a drag / zoom pauses it until a moment after the user lets go
+  const spinRef = useRef(false);
+  spinRef.current = spin && !activeTool;
+  const orbitBusyRef = useRef(false);
+  const spinResumeAtRef = useRef(0);
 
   // latest props for the pointer handlers (attached once per tool, must not close over stale values)
   const resultRef = useRef(result);
@@ -420,6 +439,14 @@ export function Viewer3D({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.1;
+    controls.autoRotateSpeed = 3; // with a per-second delta: one turn every 20 s
+    controls.addEventListener('start', () => {
+      orbitBusyRef.current = true;
+    });
+    controls.addEventListener('end', () => {
+      orbitBusyRef.current = false;
+      spinResumeAtRef.current = performance.now() + 1200;
+    });
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.75));
     const key = new THREE.DirectionalLight(0xffffff, 1.6);
@@ -497,14 +524,55 @@ export function Viewer3D({
       b.camera.aspect = w / h;
       b.camera.updateProjectionMatrix();
     }
+    let last = performance.now();
     const tick = () => {
-      b.controls.update();
+      const now = performance.now();
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      const tw = b.tween;
+      if (tw) {
+        const k = Math.min(1, (now - tw.t0) / tw.dur);
+        const e = 1 - (1 - k) ** 3; // ease-out
+        b.camera.position.lerpVectors(tw.fromPos, tw.position, e);
+        b.controls.target.lerpVectors(tw.fromTarget, tw.target, e);
+        if (k >= 1) {
+          b.camera.near = tw.near;
+          b.camera.far = tw.far;
+          b.camera.updateProjectionMatrix();
+          b.tween = null;
+        }
+      }
+      b.controls.autoRotate = spinRef.current && !b.tween && !orbitBusyRef.current && now >= spinResumeAtRef.current;
+      b.controls.update(dt);
       b.renderer.render(b.scene, b.camera);
       b.raf = requestAnimationFrame(tick);
     };
     b.raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(b.raf);
   }, [active]);
+
+  // ---- double-click: glide back to the default framing. With a face tool active the model belongs to the
+  //      tool, so only a double-click on empty background resets.
+  useEffect(() => {
+    const b = sceneRef.current;
+    if (!b) return;
+    const canvas = b.renderer.domElement;
+    const ray = new THREE.Raycaster();
+    const onDblClick = (e: MouseEvent) => {
+      if (toolRef.current) {
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+        ray.setFromCamera(ndc, b.camera);
+        const meshes = [...b.partMeshes.values(), ...b.regionMeshes.values()].filter((m) => m.visible);
+        if (ray.intersectObjects(meshes, false).length) return;
+      }
+      resetView(b);
+    };
+    canvas.addEventListener('dblclick', onDblClick);
+    return () => canvas.removeEventListener('dblclick', onDblClick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---- bed grid ------------------------------------------------------------------------------
   useEffect(() => {
@@ -1413,9 +1481,10 @@ function printedBox(b: Scene): THREE.Box3 {
   return box;
 }
 
-function fitCamera(b: Scene) {
+/** The default framing of what prints: camera position, orbit target and clip planes (null = nothing to frame). */
+function fitView(b: Scene): { position: THREE.Vector3; target: THREE.Vector3; near: number; far: number } | null {
   const box = printedBox(b);
-  if (box.isEmpty()) return;
+  if (box.isEmpty()) return null;
   const sphere = new THREE.Sphere();
   box.getBoundingSphere(sphere);
   const r = Math.max(sphere.radius, 1);
@@ -1425,10 +1494,39 @@ function fitCamera(b: Scene) {
   const fov = Math.min(vfov, hfov);
   const dist = (r / Math.sin(fov / 2)) * 1.25;
   const dir = new THREE.Vector3(0.75, -1, 0.7).normalize();
-  b.controls.target.copy(sphere.center);
-  b.camera.position.copy(sphere.center.clone().add(dir.multiplyScalar(dist)));
-  b.camera.near = Math.max(0.1, dist - r * 4);
-  b.camera.far = dist + r * 8;
+  return {
+    target: sphere.center.clone(),
+    position: sphere.center.clone().add(dir.multiplyScalar(dist)),
+    near: Math.max(0.1, dist - r * 4),
+    far: dist + r * 8,
+  };
+}
+
+function fitCamera(b: Scene) {
+  const fit = fitView(b);
+  if (!fit) return;
+  b.tween = null;
+  b.controls.target.copy(fit.target);
+  b.camera.position.copy(fit.position);
+  b.camera.near = fit.near;
+  b.camera.far = fit.far;
   b.camera.updateProjectionMatrix();
   b.controls.update();
+}
+
+/** Glide back to the default framing (double-click). The render loop runs the tween. */
+function resetView(b: Scene) {
+  const fit = fitView(b);
+  if (!fit) return;
+  // clip planes wide enough for both ends of the glide; the loop settles them on the fit's at the end
+  b.camera.near = Math.min(b.camera.near, fit.near);
+  b.camera.far = Math.max(b.camera.far, fit.far, b.camera.position.distanceTo(fit.target) + (fit.far - fit.near));
+  b.camera.updateProjectionMatrix();
+  b.tween = {
+    fromPos: b.camera.position.clone(),
+    fromTarget: b.controls.target.clone(),
+    ...fit,
+    t0: performance.now(),
+    dur: 450,
+  };
 }

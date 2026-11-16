@@ -250,6 +250,9 @@ export default function App() {
   const savedIdsRef = useRef<Set<string> | null>(null);
   const restoringRef = useRef(false);
   const overLimitRef = useRef(false);
+  /** Who set Per-part for this assembly: null = nobody yet, 'auto' = a second file turned it on, 'user' = the toggle. */
+  const perPartChoiceRef = useRef<'auto' | 'user' | null>(null);
+  const prevFileCountRef = useRef(0);
   /** Bumped by Clear all so a save already reading files doesn't write the old session back. */
   const saveGenRef = useRef(0);
   const [asmBusy, setAsmBusy] = useState(false);
@@ -274,6 +277,12 @@ export default function App() {
   const [hidden, setHidden] = useState<Set<number>>(new Set());
 
   const [showModifiers, setShowModifiers] = useState(false);
+  // Spin (slow camera orbit): remembered across visits, off by default
+  const [spin, setSpinState] = useState(() => localStorage.getItem('pimpmy3mf.spin') === '1');
+  const setSpin = (on: boolean) => {
+    setSpinState(on);
+    localStorage.setItem('pimpmy3mf.spin', on ? '1' : '0');
+  };
   const [lockAspect, setLockAspect] = useState(true);
 
   // ---- paint tools (lay-on-face / paint-face) ------------------------------------------------
@@ -636,7 +645,8 @@ export default function App() {
     setModel({ name: n === 1 ? info.items[0].fileName : `Assembly · ${n} files`, triangles: info.triangles, objects: info.objects });
     if (fresh) {
       setHiddenParts(new Set());
-      patchParams({ perPart: false }); // opt-in per model
+      patchParams({ perPart: false }); // opt-in per model (it comes on by itself when a second file is added)
+      perPartChoiceRef.current = null;
       setModelToken((t) => t + 1);
       setMovingItemId(null);
       setMate(null);
@@ -741,6 +751,7 @@ export default function App() {
     onModeChange('image');
     savedIdsRef.current = new Set();
     saveGenRef.current++;
+    perPartChoiceRef.current = null; // Start fresh: the next assembly gets the automatic Per-part again
     clearSession().catch(() => {});
   };
 
@@ -1419,6 +1430,8 @@ export default function App() {
           textures: params.textures,
           orientation: params.orientation,
           image: image ? { blob: image.blob, name: image.name, presetId: selectedPresetId } : null,
+          perPart: params.perPart,
+          perPartChoice: perPartChoiceRef.current ?? undefined,
           savedAt: Date.now(),
         };
         // cleared (or restored over) while this save was reading the files
@@ -1431,7 +1444,20 @@ export default function App() {
     }, 1000);
     return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asmItems, asmSources, hiddenParts, params.paintedFaces, params.textures, params.orientation, image, selectedPresetId]);
+  }, [asmItems, asmSources, hiddenParts, params.paintedFaces, params.textures, params.orientation, params.perPart, image, selectedPresetId]);
+
+  // a second model file turns Per-part on (each part then keeps its camo when printed on its own), unless the
+  // user already chose for this assembly; a restore decides from its saved choice instead
+  useEffect(() => {
+    const n = asmItems.length;
+    const prev = prevFileCountRef.current;
+    prevFileCountRef.current = n;
+    if (restoringRef.current || prev >= 2 || n < 2 || perPartChoiceRef.current !== null) return;
+    perPartChoiceRef.current = 'auto';
+    patchParams({ perPart: true });
+    toast({ kind: 'info', title: 'Per-part modifiers on', message: 'Each part keeps its camo when printed separately.' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asmItems.length]);
 
   const startFreshRef = useRef(onClearModel);
   startFreshRef.current = onClearModel;
@@ -1478,6 +1504,14 @@ export default function App() {
         info.sources.forEach((row, j) => row.forEach((src, k) => state.hiddenItems.includes(src.itemId) && hidden.add(`${j}:${k}`)));
         setHiddenParts(hidden);
         setParams((p) => ({ ...p, paintedFaces: state.paintedFaces, textures: state.textures, orientation: state.orientation }));
+        if (state.perPartChoice) {
+          perPartChoiceRef.current = state.perPartChoice;
+          patchParams({ perPart: !!state.perPart });
+        } else if (state.items.length >= 2) {
+          perPartChoiceRef.current = 'auto';
+          patchParams({ perPart: true });
+          toast({ kind: 'info', title: 'Per-part modifiers on', message: 'Each part keeps its camo when printed separately.' });
+        }
         savedIdsRef.current = new Set(state.items.map((it) => it.itemId));
         toast({
           kind: 'info',
@@ -1669,6 +1703,7 @@ export default function App() {
                   fitKey={fitKey}
                   active={true}
                   activeTool={mode === 'paint' && hasResult ? activeTool : null}
+                  spin={spin}
                   toolsPaused={busy}
                   paintedFaces={params.paintedFaces}
                   modelToken={geomToken}
@@ -1711,11 +1746,30 @@ export default function App() {
                 />
               )}
 
-              {hasResult && (mode === 'paint' || !!result?.base) && (
-                <label className="viewport-prisms toggle toggle-inline">
-                  <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
-                  <span>Show modifier prisms</span>
-                </label>
+              {hasResult && (
+                <div className="viewport-topright">
+                  {(mode === 'paint' || !!result?.base) && (
+                    <label className="viewport-prisms toggle toggle-inline">
+                      <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
+                      <span>Show modifier prisms</span>
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    className={`vtool viewport-spin${spin ? ' is-active' : ''}`}
+                    aria-pressed={spin}
+                    onClick={() => setSpin(!spin)}
+                    title={
+                      (spin ? 'Stop spinning' : 'Slowly spin the view (pauses while you drag or use a tool)') +
+                      ' · Double-click the view to reset it'
+                    }
+                  >
+                    <span className="vtool-icon" aria-hidden>
+                      <Icon name="spin" />
+                    </span>
+                    <span className="vtool-label">Spin</span>
+                  </button>
+                </div>
               )}
 
               {!hasResult && !showLoading && (
@@ -1755,7 +1809,10 @@ export default function App() {
               printerId={printerId}
               onPrinterId={setPrinterId}
               perPart={params.perPart}
-              onPerPart={(v) => patchParams({ perPart: v })}
+              onPerPart={(v) => {
+                perPartChoiceRef.current = 'user';
+                patchParams({ perPart: v });
+              }}
               perPartAvailable={perPartAvailable}
             />
           </div>

@@ -30,6 +30,9 @@ export interface SavedState {
   textures: FaceTexture[];
   orientation: number[] | null;
   image: { blob: Blob; name: string; presetId: string | null } | null;
+  /** Per-part modifiers, and whether the user set it ('user') or it came on with a second file ('auto'). */
+  perPart?: boolean;
+  perPartChoice?: 'auto' | 'user';
   savedAt: number;
 }
 

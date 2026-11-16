@@ -25,7 +25,8 @@ export type IconName =
   | 'eye-off'
   | 'plus'
   | 'undo'
-  | 'target';
+  | 'target'
+  | 'spin';
 
 const PATHS: Record<IconName, ReactElement> = {
   lay: (
@@ -141,6 +142,14 @@ const PATHS: Record<IconName, ReactElement> = {
     <>
       <circle cx="12" cy="12" r="8.5" />
       <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  // a turntable: an orbit ellipse around a small box, with an arrowhead showing the turn
+  spin: (
+    <>
+      <path d="M19.5 9.5C21 10.4 22 11.5 22 12.7c0 2.9-4.5 5.3-10 5.3S2 15.6 2 12.7c0-1.2 1-2.3 2.5-3.2" />
+      <path d="M9 15.6 12 18l-3 2.4" />
+      <path d="M8.5 5.2 12 3.5l3.5 1.7v4L12 11 8.5 9.2z" />
     </>
   ),
 };

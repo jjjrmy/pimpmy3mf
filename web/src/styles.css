@@ -936,11 +936,21 @@ input[type='color'] {
 .viewport-status .status.is-stale {
   opacity: 0.55;
 }
-.viewport-prisms {
+/* top-right viewport controls: modifier-prism toggle above the Spin button */
+.viewport-topright {
   position: absolute;
   right: 10px;
   top: 10px;
   z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.viewport-spin {
+  flex: none;
+}
+.viewport-prisms {
   margin: 0;
   background: rgba(10, 42, 58, 0.74);
   border: 1.5px solid rgba(255, 255, 255, 0.2);
