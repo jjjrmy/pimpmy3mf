@@ -2380,8 +2380,12 @@ input[type='color'] {
   gap: 5px;
   align-items: center;
 }
-.mate-angle {
+.mate-rotate-row > .vtool {
+  flex: none;
+}
+.mate-rotate-row input.mate-angle {
   width: 58px;
+  min-width: 0;
   flex: none;
   text-align: center;
   padding: 4px 4px;
