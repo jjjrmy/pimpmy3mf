@@ -705,12 +705,12 @@ export default function App() {
     items: asmItemsRef.current.map((it) => ({ itemId: it.itemId, fileName: it.fileName, transform: { R: it.transform.R.slice(), t: [...it.transform.t] as Rigid['t'] } })),
   });
 
-  /** Model files: added beside the current assembly, or (none loaded / `replace`) loaded fresh. */
-  const loadModels = async (files: File[], replace: boolean) => {
+  /** Model files: added beside the current assembly, or loaded fresh when none is loaded. */
+  const loadModels = async (files: File[]) => {
     const client = clientRef.current!;
     const models = files.filter((f) => MODEL_RE.test(f.name));
     if (!models.length) return;
-    const fresh = replace || asmItemsRef.current.length === 0;
+    const fresh = asmItemsRef.current.length === 0;
     setBusyLabel(models.length > 1 ? `Loading ${models.length} models…` : 'Loading model…');
     setAsmBusy(true);
     try {
@@ -742,8 +742,7 @@ export default function App() {
       setAsmBusy(false);
     }
   };
-  const onAddModels = (files: File[]) => loadModels(files, false);
-  const onReplaceModels = (files: File[]) => loadModels(files, true);
+  const onAddModels = (files: File[]) => loadModels(files);
 
   const onClearModel = () => {
     clientRef.current!.clearModel();
@@ -1638,7 +1637,6 @@ export default function App() {
                   files={fileRows}
                   movingItemId={movingItemId}
                   onAddModels={onAddModels}
-                  onReplaceModels={onReplaceModels}
                   onClearModel={onClearModel}
                   onToggleFile={onToggleFile}
                   onSelectFile={onSelectFile}

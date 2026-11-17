@@ -2356,11 +2356,15 @@ input[type='color'] {
   margin-top: 8px;
 }
 .asm-actions > .btn-ghost {
-  flex: 1;
+  width: auto;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
+  font-size: 13px;
+  padding: 5px 11px;
+  white-space: nowrap;
 }
 .mate-panel {
   display: flex;

@@ -23,8 +23,6 @@ interface PaintTabProps {
   movingItemId: string | null;
   /** Adds files to the assembly (the first one loads like a single model). */
   onAddModels: (files: File[]) => void;
-  /** Drops everything and loads these files instead. */
-  onReplaceModels: (files: File[]) => void;
   onClearModel: () => void;
   onToggleFile: (itemId: string) => void;
   onSelectFile: (itemId: string) => void;
@@ -49,12 +47,7 @@ export function PaintTab(props: PaintTabProps) {
   const { model, files } = props;
   const parts = model ? model.objects.reduce((n, o) => n + o.parts.length, 0) : 0;
   const multi = files.length > 1;
-  // the one file input serves Add (append) and Replace all
-  const replacing = useRef(false);
-  const pick = (replace: boolean) => {
-    replacing.current = replace;
-    modelInputRef.current?.click();
-  };
+  const pickModels = () => modelInputRef.current?.click();
 
   return (
     <div className="tab-body">
@@ -69,7 +62,7 @@ export function PaintTab(props: PaintTabProps) {
           hidden
           onChange={(e) => {
             const picked = Array.from(e.target.files ?? []);
-            if (picked.length) (replacing.current ? props.onReplaceModels : props.onAddModels)(picked);
+            if (picked.length) props.onAddModels(picked);
             e.target.value = '';
           }}
         />
@@ -134,11 +127,8 @@ export function PaintTab(props: PaintTabProps) {
               </div>
             )}
             <div className="asm-actions">
-              <button type="button" className="btn-ghost" onClick={() => pick(false)} title="Add another file and mate it to this one">
+              <button type="button" className="btn-ghost" onClick={pickModels} title="Add another file and mate it to this one">
                 <Icon name="plus" /> Add model
-              </button>
-              <button type="button" className="btn-ghost" onClick={() => pick(true)} title="Remove every file and load new ones">
-                Replace all
               </button>
               <button type="button" className="btn-ghost" onClick={props.onClearModel} title="Remove every file">
                 Clear all
@@ -151,7 +141,7 @@ export function PaintTab(props: PaintTabProps) {
               <div className="model-name">No model</div>
               <div className="dim">Drop an STL / 3MF / OBJ anywhere to paint it.</div>
             </div>
-            <button type="button" className="btn-chunky btn-chunky-sm" onClick={() => pick(false)}>
+            <button type="button" className="btn-chunky btn-chunky-sm" onClick={pickModels}>
               Upload model
             </button>
           </div>
