@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { Mesh as CoreMesh, FaceTexture, ModelPlates, PaintedFace, Result, Vec3 } from '../core/types';
+import type { CylinderFrame, Mesh as CoreMesh, FaceTexture, Frame, ModelPlates, PaintedFace, Result, Vec3 } from '../core/types';
 import { plateCentre } from '../core/plates';
 import { buildAdjacency, planarRegion, smoothRegion } from '../core/faces';
 import { angleDelta, rayAngleAbout, rayLineParam, snapGizmo } from '../core/assembly';
@@ -162,8 +162,8 @@ interface Scene {
   strokeMeshes: THREE.Mesh[];
   /** Transient hover highlight for the active tool. */
   highlight: THREE.Mesh | null;
-  texture: THREE.CanvasTexture | null;
-  textureCanvas: HTMLCanvasElement | null;
+  /** Camo textures: one per projection (multi-plate: one per plate, see projViews). */
+  textures: { texture: THREE.CanvasTexture; canvas: HTMLCanvasElement; view: ProjView }[];
   raf: number;
 }
 
@@ -272,24 +272,43 @@ function disposeGroup(group: THREE.Group) {
   group.clear();
 }
 
-function makeTextureCanvas(result: Result): HTMLCanvasElement {
-  const { w, h } = mapScale(result.frame, 1024);
+/**
+ * One camo projection the preview paints: the whole result, or (multi-plate) one plate with its own frame, rings and
+ * cylinder. `plate` = index into result.plateProjections / region.plateRings, null for the whole result.
+ */
+interface ProjView { frame: Frame; cylinder: CylinderFrame | null; plate: number | null }
+
+function projViews(result: Result): ProjView[] {
+  if (!result.plateProjections?.length) return [{ frame: result.frame, cylinder: result.cylinder, plate: null }];
+  return result.plateProjections.map((pp, i) => ({ frame: pp.frame, cylinder: pp.cylinder, plate: i }));
+}
+
+/** Index into projViews(result) for each model object (multi-plate: its plate's projection; else 0). */
+function objectViews(result: Result): number[] {
+  const n = result.model?.objects.length ?? 0;
+  const out = new Array<number>(n).fill(0);
+  result.plateProjections?.forEach((pp, i) => { for (const j of pp.objects) out[j] = i; });
+  return out;
+}
+
+function makeTextureCanvas(view: ProjView): HTMLCanvasElement {
+  const { w, h } = mapScale(view.frame, 1024);
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
   return canvas;
 }
 
-function drawTexture(canvas: HTMLCanvasElement, result: Result, hexes: string[], hidden: Set<number>) {
+function drawTexture(canvas: HTMLCanvasElement, result: Result, view: ProjView, hexes: string[], hidden: Set<number>) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  const { s } = mapScale(result.frame, canvas.width);
+  const { s } = mapScale(view.frame, canvas.width);
   ctx.fillStyle = hexes[0] ?? result.regions[0]?.hex ?? '#cccccc';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const regions: MapRegion[] = result.regions
     .filter((r) => !hidden.has(r.index))
-    .map((r) => ({ rings: r.rings, color: hexes[r.index] ?? r.hex }));
-  drawColorMap(ctx, regions, result.frame, s);
+    .map((r) => ({ rings: view.plate == null ? r.rings : (r.plateRings?.[view.plate] ?? []), color: hexes[r.index] ?? r.hex }));
+  drawColorMap(ctx, regions, view.frame, s);
 }
 
 /** Palette color for a (possibly out-of-range after a palette shrink) color index: clamped to N-1. */
@@ -303,13 +322,13 @@ function clampedColor(color: number, hexes: string[], result: Result): string {
  * Part geometry with UVs from its planar projection onto the color map (exact: projection is linear).
  * For cylindrical projection the planar UVs are unused — the material recomputes UVs per fragment.
  */
-function paintedGeometry(m: CoreMesh, result: Result): THREE.BufferGeometry {
+function paintedGeometry(m: CoreMesh, result: Result, view: ProjView): THREE.BufferGeometry {
   const geo = toGeometry(m);
   const pos = m.vertices;
   const count = pos.length / 3;
   const uv = new Float32Array(count * 2);
   const proj = projectUV(result.axis);
-  const { x0, y0, x1, y1 } = result.frame;
+  const { x0, y0, x1, y1 } = view.frame;
   const du = x1 - x0;
   const dv = y1 - y0;
   for (let i = 0; i < count; i++) {
@@ -330,13 +349,13 @@ function paintedGeometry(m: CoreMesh, result: Result): THREE.BufferGeometry {
  * Material for a textured part. Planar reads the baked UV attribute. Cylindrical computes (u, v) per
  * fragment from the model-space position so the 0/360° seam doesn't smear across a triangle.
  */
-function partMaterial(texture: THREE.CanvasTexture, result: Result): THREE.MeshStandardMaterial {
+function partMaterial(texture: THREE.CanvasTexture, result: Result, view: ProjView): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.7, metalness: 0.05 });
-  if (result.projection !== 'cylindrical' || !result.cylinder) return mat;
+  if (result.projection !== 'cylindrical' || !view.cylinder) return mat;
 
-  const { center, axis, R0 } = result.cylinder;
+  const { center, axis, R0 } = view.cylinder;
   const { e1, e2, a } = CYL_BASIS[axis];
-  const { x0, y0, x1, y1 } = result.frame;
+  const { x0, y0, x1, y1 } = view.frame;
   texture.wrapS = THREE.RepeatWrapping; // u wraps at the seam
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uCenter = { value: new THREE.Vector3(center[0], center[1], center[2]) };
@@ -538,8 +557,7 @@ export function Viewer3D({
       innerMeshes: [],
       strokeMeshes: [],
       highlight: null,
-      texture: null,
-      textureCanvas: null,
+      textures: [],
       raf: 0,
     };
     sceneRef.current = bundle;
@@ -561,7 +579,7 @@ export function Viewer3D({
       controls.dispose();
       disposeGroup(objectGroup);
       disposeGroup(bedGroup);
-      bundle.texture?.dispose();
+      for (const t of bundle.textures) t.texture.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement);
       sceneRef.current = null;
@@ -725,9 +743,8 @@ export function Viewer3D({
     b.innerMeshes = [];
     b.strokeMeshes = []; // stroke previews disposed with the group
     b.highlight = null; // disposed with the group
-    b.texture?.dispose();
-    b.texture = null;
-    b.textureCanvas = null;
+    for (const t of b.textures) t.texture.dispose();
+    b.textures = [];
 
     if (result.mode === 'image') {
       for (const r of result.regions) {
@@ -746,12 +763,14 @@ export function Viewer3D({
         b.objectGroup.add(mesh);
       }
     } else if (result.model) {
-      const canvas = makeTextureCanvas(result);
-      drawTexture(canvas, result, hexes, hidden);
-      const texture = new THREE.CanvasTexture(canvas);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      b.texture = texture;
-      b.textureCanvas = canvas;
+      b.textures = projViews(result).map((view) => {
+        const canvas = makeTextureCanvas(view);
+        drawTexture(canvas, result, view, hexes, hidden);
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        return { texture, canvas, view };
+      });
+      const viewOf = objectViews(result);
 
       // one mesh per input part, so the structure the export keeps is also visible (and hideable) here
       result.model.objects.forEach((o, j) => {
@@ -759,7 +778,8 @@ export function Viewer3D({
           const key = `${j}:${k}`;
           // textured parts show the relief mesh (same coordinates, so the camo UVs / cylinder shader still line up)
           const shaped = result.shaped?.[j]?.[k] ?? null;
-          const mesh = new THREE.Mesh(paintedGeometry(shaped ?? p.mesh, result), partMaterial(texture, result));
+          const { texture, view } = b.textures[viewOf[j]] ?? b.textures[0];
+          const mesh = new THREE.Mesh(paintedGeometry(shaped ?? p.mesh, result, view), partMaterial(texture, result, view));
           mesh.name = p.name;
           mesh.visible = !hiddenParts.has(key);
           mesh.userData = { objectIndex: j, partIndex: k };
@@ -972,9 +992,9 @@ export function Viewer3D({
       for (const mesh of b.partMeshes.values()) glass(mesh, showModifiers);
       for (const mesh of b.faceMeshes.values()) ghost(mesh, showModifiers);
       for (const m of b.innerMeshes) ghost(m.mesh, showModifiers);
-      if (b.textureCanvas && b.texture) {
-        drawTexture(b.textureCanvas, result, hexes, hidden);
-        b.texture.needsUpdate = true;
+      for (const t of b.textures) {
+        drawTexture(t.canvas, result, t.view, hexes, hidden);
+        t.texture.needsUpdate = true;
       }
       for (const [idx, meshes] of b.modifierMeshes) {
         for (const mesh of meshes) {

@@ -6,9 +6,13 @@
 //   - the export: same plate count, the same object -> plate mapping (by name), plater_name kept, per-plate
 //     wipe_tower_x/y; P2S / X1C: each object's XY offset from its plate centre = the source's (0.5 mm), unless
 //     that plate records a shift;
-//   - slicing (`--slice 0 --outputdir DIR FILE`): Bambu Studio 2.8 for all three, 1.10 for X1C. rc 0 and one
-//     G-code per plate (A1 mini: reported, not required); per plate the prime tower is on the bed, clear of the
-//     objects and of the exclusion polygon (validate-tower.ts' checks);
+//   - per-plate projection: one projection per plate whose frame is that plate's objects' bbox (+1 mm) with the
+//     whole image fitted onto it; every lid's color split close to the image's (and to the other lids'); tile mode
+//     (40 mm) uses the same tile on every plate;
+//   - slicing (`--slice 0 --outputdir DIR FILE`, one at a time): Bambu Studio 2.8 for all three, 1.10 for X1C
+//     and P2S. rc 0 and one G-code per plate (A1 mini: reported, not required; P2S in 1.10: must be refused, 1.10
+//     has no P2S profile); per plate the prime tower is on the bed, clear of the objects and of the exclusion
+//     polygon (validate-tower.ts' checks);
 //   - lay-on-face per plate: plate 3's object laid on a big planar face moves only that object, stays inside
 //     plate 3's cell, min z = 0; every other object is untouched.
 //
@@ -138,13 +142,94 @@ const params: Params = { ...DEFAULT_PARAMS, colors: 4 };
 const t0 = Date.now();
 const pipe = createPipeline();
 const result = await pipe.run(image, model, params);
-pipe.dispose();
 const hexes = result.regions.map((r) => r.hex.toUpperCase());
 console.log(`pipeline: ${((Date.now() - t0) / 1000).toFixed(1)} s, colors ${hexes.join(' ')}, warnings ${result.warnings.length}`);
 check('pipeline: result.model keeps plates', result.model?.plates?.count === 7);
 const objects: ExportObject[] = objectsFromResult(result, hexes, 'urban');
 check('export objects carry plates', objects.every((o, j) => o.plate === plates.objectPlate[j]));
 const sourcePlates = { count: plates.count, bed: plates.bed, bedOrigin: plates.bedOrigin, names: plates.names };
+
+// ------------------------------------------------------------------------------------ 3b. per-plate projection
+// Every plate gets its own full pattern: its frame is its objects' bbox (+ 1 mm) in the projection plane, the image
+// is fitted (cover) onto it, the palette is shared. Before (one image stretched over the whole 723.8 x 269.7 mm
+// plate grid) the lids got very different splits: color 3 was 0.7 % of plate 5's lid and 1.3 % of plate 2's, color
+// 4 was 57 % of plates 3 / 6 (image share 15 %).
+
+const AXIS_R = { z: [1, 0, 0, 0, 1, 0, 0, 0, 1], y: [1, 0, 0, 0, 0, -1, 0, 1, 0], x: [0, 0, 1, 1, 0, 0, 0, 1, 0] };
+/** uv bbox (+ margin) of some objects of m, like the pipeline's frame. */
+function uvFrame(m: Model, objs: number[], R: number[], margin = 1) {
+  let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+  for (const j of objs) for (const part of m.objects[j].parts) {
+    const v = part.mesh.vertices;
+    for (let i = 0; i < v.length; i += 3) {
+      const u = v[i] * R[0] + v[i + 1] * R[3] + v[i + 2] * R[6], w = v[i] * R[1] + v[i + 1] * R[4] + v[i + 2] * R[7];
+      u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, w); v1 = Math.max(v1, w);
+    }
+  }
+  return { x0: u0 - margin, y0: v0 - margin, x1: u1 + margin, y1: v1 + margin };
+}
+const meshVolume = (m: { vertices: Float32Array; triangles: Uint32Array } | null) => {
+  if (!m) return 0;
+  const v = m.vertices, t = m.triangles;
+  let s = 0;
+  for (let i = 0; i < t.length; i += 3) {
+    const a = t[i] * 3, b = t[i + 1] * 3, c = t[i + 2] * 3;
+    s += v[a] * (v[b + 1] * v[c + 2] - v[b + 2] * v[c + 1]) - v[a + 1] * (v[b] * v[c + 2] - v[b + 2] * v[c]) + v[a + 2] * (v[b] * v[c + 1] - v[b + 1] * v[c]);
+  }
+  return Math.abs(s / 6);
+};
+{
+  const R = AXIS_R[params.axis];
+  const pp = result.plateProjections ?? [];
+  check('per-plate: one projection per plate', pp.length === plates.count, `(${pp.length})`);
+  check('per-plate: projection objects = plate mapping', pp.every((p) => p.objects.every((j) => plates.objectPlate[j] === p.plate))
+    && pp.reduce((n, p) => n + p.objects.length, 0) === model.objects.length);
+  check('per-plate: regions carry rings per plate', result.regions.every((r) => r.plateRings?.length === pp.length));
+  const aspect = image.width / image.height;
+  let frameWorst = 0, fitOk = true;
+  const rows: string[] = [];
+  for (const p of pp) {
+    const f = uvFrame(result.model!, p.objects, R);
+    const d = Math.max(Math.abs(f.x0 - p.frame.x0), Math.abs(f.y0 - p.frame.y0), Math.abs(f.x1 - p.frame.x1), Math.abs(f.y1 - p.frame.y1));
+    frameWorst = Math.max(frameWorst, d);
+    // fit (cover): the whole image (its aspect) scaled to just cover this plate's frame
+    const fw = p.frame.x1 - p.frame.x0, fh = p.frame.y1 - p.frame.y0;
+    const covers = p.tile.w >= fw - 1e-6 && p.tile.h >= fh - 1e-6 && (Math.abs(p.tile.w - fw) < 1e-6 || Math.abs(p.tile.h - fh) < 1e-6);
+    if (!covers || Math.abs(p.tile.w / p.tile.h - aspect) > 1e-6 || p.tile.repeat) fitOk = false;
+    rows.push(`p${p.plate + 1}: frame ${fw.toFixed(1)} x ${fh.toFixed(1)} mm, image ${p.tile.w.toFixed(1)} x ${p.tile.h.toFixed(1)} mm, grid ${p.gridW}x${p.gridH}`);
+  }
+  console.log(`   ${rows.join('\n   ')}`);
+  check('per-plate: frame = that plate\'s objects\' bbox (+1 mm)', frameWorst < 1e-3, `(worst ${frameWorst.toExponential(1)} mm)`);
+  check('per-plate: full image fitted (cover) onto each plate', fitOk);
+
+  // per lid: each color's share of the modifier volume vs the image's color shares (same palette, image mode)
+  const ip = createPipeline();
+  const imgShares = (await ip.run(image, null, params)).regions.map((r) => r.coverage);
+  ip.dispose();
+  console.log(`   image shares ${imgShares.map((x) => x.toFixed(3)).join(' ')}`);
+  let minRatio = Infinity, maxDev = 0;
+  const shares: number[][] = [];
+  for (let j = 0; j < model.objects.length; j++) {
+    const v = result.regions.map((r) => meshVolume(r.objectMeshes?.[j] ?? null));
+    const tot = v.reduce((a, b) => a + b, 0) || 1;
+    const sh = v.map((x) => x / tot);
+    shares.push(sh);
+    sh.forEach((x, k) => { minRatio = Math.min(minRatio, x / imgShares[k]); maxDev = Math.max(maxDev, Math.abs(x - imgShares[k])); });
+    console.log(`   object ${j} (plate ${plates.objectPlate[j] + 1}): ${sh.map((x) => x.toFixed(3)).join(' ')}`);
+  }
+  const spread = Math.max(...imgShares.map((_, k) => Math.max(...shares.map((s) => s[k])) - Math.min(...shares.map((s) => s[k]))));
+  check('per-plate: every color on every lid (>= 40 % of its image share)', minRatio >= 0.4, `(min ratio ${minRatio.toFixed(2)})`);
+  check('per-plate: lid shares near the image shares (<= 0.12)', maxDev <= 0.12, `(max |Δ| ${maxDev.toFixed(3)})`);
+  check('per-plate: the lids match each other (spread <= 0.05)', spread <= 0.05, `(max spread ${spread.toFixed(3)})`);
+
+  // tile mode: one tile size (mm) on every plate, each tiled from its own frame corner
+  const tiled = await pipe.run(image, model, { ...params, width: 40 });
+  const tp = tiled.plateProjections ?? [];
+  const sameTile = tp.length === plates.count && tp.every((p) => p.tile.repeat && Math.abs(p.tile.w - 40) < 1e-9 && Math.abs(p.tile.h - tp[0].tile.h) < 1e-9);
+  check('tile: same 40 mm tile on every plate', sameTile, `(${tp.map((p) => `${p.tile.w.toFixed(2)}x${p.tile.h.toFixed(2)}`).join(', ')})`);
+  check('tile: colors on every lid', model.objects.every((_, j) => tiled.regions.every((r) => meshVolume(r.objectMeshes?.[j] ?? null) > 0)));
+}
+pipe.dispose();
 
 type Pt = [number, number];
 const parsePoly = (v: unknown): Pt[] =>
@@ -287,17 +372,24 @@ function slice(ver: string, file: string, dir: string): Promise<{ exit: number |
   });
 }
 
+// 1.10 has no P2S profile: its P2S slice must be refused (as in validate-studio-compat), X1C must slice in both
 const jobs: { p: Proj; ver: string }[] = [];
-for (const p of projs) for (const ver of p.id === 'x1c-0.4' ? ['2.8', '1.10'] : ['2.8']) jobs.push({ p, ver });
+for (const p of projs) for (const ver of p.id === 'a1mini-0.4' ? ['2.8'] : ['2.8', '1.10']) jobs.push({ p, ver });
 const missing = Object.entries(BIN).filter(([, b]) => !existsSync(b)).map(([v]) => v);
 if (missing.length) console.log(`(Bambu Studio ${missing.join(', ')} missing: those slices are skipped)`);
-const results = await Promise.all(jobs.filter((j) => existsSync(BIN[j.ver])).map(async ({ p, ver }) => ({ p, ver, s: await slice(ver, p.file, `${OUT}/${p.id}-${ver}`) })));
+// one slice at a time (the machine is shared; parallel slices hit timeouts)
+const results: { p: Proj; ver: string; s: Awaited<ReturnType<typeof slice>> }[] = [];
+for (const { p, ver } of jobs.filter((j) => existsSync(BIN[j.ver]))) results.push({ p, ver, s: await slice(ver, p.file, `${OUT}/${p.id}-${ver}`) });
 for (const { p, ver, s } of results) {
   const tag = `${p.id} slice ${ver}`;
   const required = p.id !== 'a1mini-0.4';
   const summary = `exit ${s.exit}, return_code ${s.rc}${s.err ? ` "${s.err}"` : ''}, ${s.gcodes.length} plate G-codes, ${(s.ms / 1000).toFixed(0)} s${s.timedOut ? ', TIMEOUT' : ''}`;
   if (!required) {
     console.log(`INFO ${tag}: ${summary} (A1 mini: oversized plates, not required)`);
+    continue;
+  }
+  if (p.id === 'p2s-0.4' && ver === '1.10') {
+    check(`${tag}: refused (1.10 has no P2S profile)`, !(s.rc === 0 && s.gcodes.length === p.nPlates), summary);
     continue;
   }
   check(`${tag}: return_code 0`, s.rc === 0 || (ver === '1.10' && s.rc === null && s.exit === 0), summary);

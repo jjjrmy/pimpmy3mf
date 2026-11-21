@@ -290,6 +290,25 @@ export interface ColorRegion {
    * object per part (named after the part) carrying these modifiers.
    */
   partMeshes: (Mesh | null)[][] | null;
+  /**
+   * Multi-plate paint results only: this color's rings per plate (result.plateProjections order), each in that
+   * plate's own frame. `rings` is then all plates' rings together. Absent otherwise.
+   */
+  plateRings?: Float32Array[][];
+}
+
+/** One plate's own projection (multi-plate paint results): the camo is fitted / tiled per plate. */
+export interface PlateProjection {
+  /** 0-based plate index (model.plates). */
+  plate: number;
+  /** result.model object indices on this plate. */
+  objects: number[];
+  /** This plate's objects' bounding box in the projection plane (+ 1 mm margin), like Result.frame. */
+  frame: Frame;
+  tile: { w: number; h: number; repeat: boolean; wraps: number | null };
+  cylinder: CylinderFrame | null;
+  gridW: number;
+  gridH: number;
 }
 
 export interface Result {
@@ -311,6 +330,11 @@ export interface Result {
   orientation: number[] | null;
   /** Echo of params.plateOrientations (multi-plate models; null otherwise). result.model is already in this pose. */
   plateOrientations?: (number[] | null)[] | null;
+  /**
+   * Multi-plate paint results: each plate's own projection (one full pattern per plate, one shared palette).
+   * `frame` is then the union of the plate frames and `tile` the first plate's. Absent otherwise.
+   */
+  plateProjections?: PlateProjection[];
   /**
    * The rigid motion lay-on-face applied (as-loaded -> result.model: x' = R·x + t), null when not oriented. Lets the
    * assemble tool map picks back to assembly space.

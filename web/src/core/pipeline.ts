@@ -3,7 +3,7 @@
 // thickness change only re-extrudes.
 import type {
   Pipeline, RasterImage, Mesh, Model, ModelObject, ModelPart, Params, Result, ColorRegion, Axis, RGB, RunOptions, FaceSkin,
-  Projection, CylinderFrame, Vec3,
+  Projection, CylinderFrame, Vec3, PlateProjection,
 } from './types';
 import { DEFAULT_PARAMS } from './types';
 import { initManifold } from './manifold';
@@ -166,6 +166,9 @@ export function createPipeline(): Pipeline {
   let gRings: Map<number, { x: Float64Array; y: Float64Array }[]> | null = null;
   let gGeom: (Geom & { ox: number; oy: number }) | null = null;
   let gColors: RGB[] = []; let gWarn: string[] = [];
+  // multi-plate: each plate's object subset (cached per model) and its traced rings
+  let pModel: Model | null = null; let pSubs: PlateSub[] = [];
+  let gPlateRings: Map<number, { x: Float64Array; y: Float64Array }[]>[] | null = null;
   let eKey = ''; let eRegions: ColorRegion[] | null = null;
   // stage 0 (textures, then orientation) and stage 4 (painted-face skins)
   let tIn: Model | null = null; let tKey = ''; let tSrc: Model | null = null;
@@ -230,7 +233,14 @@ export function createPipeline(): Pipeline {
       return plainResult(model, origModel, params, t0);
     }
 
-    const geom = computeGeom(image, model, params) as Geom & { ox: number; oy: number };
+    // multi-plate paint: every plate gets its own frame (its objects' bbox) and so its own full pattern; the image is
+    // still quantized once (shared palette / indices), downscaled for the plate that needs the finest pixels
+    if (model?.plates && model !== pModel) { pSubs = plateSubsets(model); pModel = model; }
+    const subs = model?.plates && pSubs.length ? pSubs : null;
+    const pGeoms = subs ? subs.map((sub) => computeGeom(image, sub.model, params)) : null;
+    const geom = pGeoms
+      ? pGeoms.reduce((a, b) => (b.tw > a.tw ? b : a))
+      : computeGeom(image, model, params) as Geom & { ox: number; oy: number };
 
     // ---- stage 1: downscale + quantize ----
     // downscale when the image is far finer than the grid
@@ -253,11 +263,10 @@ export function createPipeline(): Pipeline {
 
     // geometry depends on the actually-used src dims, so recompute grid metrics with src
     const g = recomputeGrid(geom, src, params);
+    const pGrids = pGeoms ? pGeoms.map((pg) => recomputeGrid(pg, src, params)) : null;
+    const g0 = pGrids ? pGrids[0] : g; // the grid the result reports (plates: the first plate's)
 
-    // ---- stage 2: resample + despeckle + trace ----
-    const g2Key = `${qVer}|${model ? 'M' : 'I'}|${params.width}|${params.height}|${params.smooth}|${params.minFeature}|${params.resolution}|${params.axis}|${geom.projection}|${params.rotation}|${params.offsetX}|${params.offsetY}`;
-    if (cModel !== model || gKey !== g2Key || !gRings) {
-      await tick('grid');
+    const traceRings = async (g: Geom) => {
       const { nx, ny, bx0, bx1, by0, by1, qx, qy } = g;
       const th = g.th, tw = g.tw, W = qSrc!.width, H = qSrc!.height;
       const sy = qy / (th / H), sx = qx / (tw / W);
@@ -303,7 +312,21 @@ export function createPipeline(): Pipeline {
           return { x, y };
         }));
       }
-      gRings = mm; gGeom = g; gColors = colors; gWarn = qRes!.warnings.slice();
+      return mm;
+    };
+
+    // ---- stage 2: resample + despeckle + trace ----
+    const g2Key = `${qVer}|${model ? 'M' : 'I'}|${params.width}|${params.height}|${params.smooth}|${params.minFeature}|${params.resolution}|${params.axis}|${geom.projection}|${params.rotation}|${params.offsetX}|${params.offsetY}${subs ? `|P${subs.length}` : ''}`;
+    if (cModel !== model || gKey !== g2Key || !gRings) {
+      await tick('grid');
+      if (pGrids) {
+        gPlateRings = [];
+        for (const pg of pGrids) gPlateRings.push(await traceRings(pg));
+        gRings = new Map();
+      } else {
+        gRings = await traceRings(g); gPlateRings = null;
+      }
+      gGeom = g; gColors = colors; gWarn = qRes!.warnings.slice();
       cModel = model; gKey = g2Key; gVer++;
     }
 
@@ -311,7 +334,11 @@ export function createPipeline(): Pipeline {
     const heightRange = g.w1 - g.w0;
     const cyl = g.cyl;
     const cylMode = geom.mode === 'paint' && geom.projection === 'cylindrical' && cyl != null;
-    const e3Key = `${gVer}|${geom.mode}|${geom.projection}|${cylMode ? cyl!.R0.toFixed(6) : (geom.mode === 'image' ? params.thickness : heightRange)}|${params.perPart ? 'P' : ''}`;
+    const e3Key = `${gVer}|${geom.mode}|${geom.projection}|${cylMode ? cyl!.R0.toFixed(6) : (geom.mode === 'image' ? params.thickness : heightRange)}|${params.perPart ? 'P' : ''}${pGrids ? `|plates:${pGrids.map((pg) => (cylMode ? pg.cyl!.R0.toFixed(6) : pg.w1 - pg.w0)).join(',')}` : ''}`;
+    if (pGrids && (eKey !== e3Key || !eRegions)) {
+      eRegions = await extrudePlates(wasm, model!, subs!, pGrids, gPlateRings!, colors, cylMode, params.perPart, tick);
+      eKey = e3Key;
+    }
     if (eKey !== e3Key || !eRegions) {
       await tick('extrude');
       // per-object crop boxes: a Bambu modifier only acts on its own object. Planar crops in uvw;
@@ -399,16 +426,34 @@ export function createPipeline(): Pipeline {
       mesh: cloneMesh(r.mesh),
       objectMeshes: r.objectMeshes ? r.objectMeshes.map(cloneMesh) : null,
       partMeshes: r.partMeshes ? r.partMeshes.map((o) => o.map(cloneMesh)) : null,
+      ...(r.plateRings ? { plateRings: r.plateRings.map((pr) => pr.map((ring) => ring.slice())) } : {}),
     }));
+    const plateProjections: PlateProjection[] | null = subs && pGrids
+      ? subs.map((sub, p) => {
+        const pg = pGrids[p];
+        return {
+          plate: sub.plate, objects: sub.objects.slice(),
+          frame: { x0: pg.bx0, y0: pg.by0, x1: pg.bx1, y1: pg.by1 },
+          tile: { w: pg.tw, h: pg.th, repeat: pg.tile, wraps: pg.wraps },
+          cylinder: pg.cyl, gridW: pg.nx, gridH: pg.ny,
+        };
+      })
+      : null;
+    const frame = plateProjections
+      ? plateProjections.reduce((f, pp) => ({
+        x0: Math.min(f.x0, pp.frame.x0), y0: Math.min(f.y0, pp.frame.y0), x1: Math.max(f.x1, pp.frame.x1), y1: Math.max(f.y1, pp.frame.y1),
+      }), { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity })
+      : { x0: g.bx0, y0: g.by0, x1: g.bx1, y1: g.by1 };
 
     return {
       mode: geom.mode,
       regions: outRegions,
-      frame: { x0: g.bx0, y0: g.by0, x1: g.bx1, y1: g.by1 },
-      tile: { w: g.tw, h: g.th, repeat: g.tile, wraps: g.wraps },
+      frame,
+      tile: { w: g0.tw, h: g0.th, repeat: g0.tile, wraps: g0.wraps },
       axis: params.axis,
       projection: geom.mode === 'paint' ? params.projection : 'planar',
-      cylinder: g.cyl,
+      cylinder: g0.cyl,
+      ...(plateProjections ? { plateProjections } : {}),
       orientation: geom.mode === 'paint' && !plates ? params.orientation : null,
       plateOrientations: geom.mode === 'paint' && plates ? plateRs : null,
       orientPlace: geom.mode === 'paint' && oPlace ? { R: oPlace.R.slice(), t: [...oPlace.t] as Vec3 } : null,
@@ -421,7 +466,7 @@ export function createPipeline(): Pipeline {
       shaped: geom.mode === 'paint' && tChanged && model
         ? model.objects.map((o, j) => o.parts.map((p, k) => (tChanged![j]?.[k] ? cloneMesh(p.mesh) : null)))
         : null,
-      stats: { imageW: image.width, imageH: image.height, gridW: g.nx, gridH: g.ny, pitch: g.qx, ms },
+      stats: { imageW: image.width, imageH: image.height, gridW: g0.nx, gridH: g0.ny, pitch: g0.qx, ms },
       warnings: geom.mode === 'paint' && tWarn.length ? [...gWarn, ...tWarn] : gWarn.slice(),
     };
   };
@@ -457,6 +502,7 @@ export function createPipeline(): Pipeline {
 
   const dispose = () => {
     cImage = null; cModel = null; qRes = null; qSrc = null; gRings = null; gGeom = null; eRegions = null;
+    pModel = null; pSubs = []; gPlateRings = null;
     qKey = ''; gKey = ''; eKey = '';
     oSrc = null; oModel = null; oOrig = null; oKey = '';
     tIn = null; tSrc = null; tKey = ''; tChanged = null; tApplied = []; tWarn = []; sRegions = null; sSkins = []; sKey = '';
@@ -465,6 +511,79 @@ export function createPipeline(): Pipeline {
   };
 
   return { run, dispose };
+}
+
+interface PlateSub { plate: number; objects: number[]; model: Model }
+
+/** A multi-plate model's non-empty plates, each with its object indices and a model of just those objects. */
+function plateSubsets(model: Model): PlateSub[] {
+  const plates = model.plates!;
+  const out: PlateSub[] = [];
+  for (let p = 0; p < plates.count; p++) {
+    const objects = plates.objectPlate.flatMap((q, j) => (q === p ? [j] : []));
+    if (objects.length) out.push({ plate: p, objects, model: { objects: objects.map((j) => model.objects[j]) } });
+  }
+  return out;
+}
+
+function concatMeshes(meshes: Mesh[]): Mesh | null {
+  if (!meshes.length) return null;
+  if (meshes.length === 1) return meshes[0];
+  let nv = 0, nt = 0;
+  for (const m of meshes) { nv += m.vertices.length; nt += m.triangles.length; }
+  const vertices = new Float32Array(nv), triangles = new Uint32Array(nt);
+  let ov = 0, ot = 0;
+  for (const m of meshes) {
+    vertices.set(m.vertices, ov);
+    const base = ov / 3;
+    for (let i = 0; i < m.triangles.length; i++) triangles[ot + i] = m.triangles[i] + base;
+    ov += m.vertices.length; ot += m.triangles.length;
+  }
+  return { vertices, triangles };
+}
+
+/**
+ * Multi-plate stage 3: extrude each plate's rings with its own frame / depth range and crops for its objects, then
+ * merge per color back into whole-model regions by object index (objectMeshes / partMeshes line up with
+ * model.objects; mesh = all plates' prisms; coverage = summed area).
+ */
+async function extrudePlates(
+  wasm: Awaited<ReturnType<typeof initManifold>>, model: Model, subs: PlateSub[], grids: Geom[],
+  plateRings: Map<number, { x: Float64Array; y: Float64Array }[]>[], colors: RGB[], cylMode: boolean, perPart: boolean,
+  tick: (stage: string, frac?: number) => Promise<void>,
+): Promise<ColorRegion[]> {
+  const ncol = colors.length;
+  const acc = colors.map(() => ({
+    meshes: [] as Mesh[], rings: [] as Float32Array[], plateRings: [] as Float32Array[][], area: 0,
+    objectMeshes: model.objects.map(() => null) as (Mesh | null)[],
+    partMeshes: perPart ? model.objects.map((o) => o.parts.map(() => null)) as (Mesh | null)[][] : null,
+  }));
+  for (let p = 0; p < subs.length; p++) {
+    await tick('extrude', p / subs.length);
+    const sub = subs[p], pg = grids[p], rings = plateRings[p];
+    const crop = sub.model.objects.map((obj) => (cylMode ? objectBoxXYZ(obj) : objectBoxUVW(obj, pg.R)));
+    const partCrop = perPart ? sub.model.objects.map((obj) => obj.parts.map((pt) => (cylMode ? partBoxXYZ(pt) : partBoxUVW(pt, pg.R)))) : null;
+    const cylRes = cylMode
+      ? extrudeRegionsCyl(wasm, Array.from({ length: ncol }, (_, k) => rings.get(k) ?? []), pg.cyl!, crop, partCrop)
+      : null;
+    for (let k = 0; k < ncol; k++) {
+      const res = cylRes ? cylRes[k] : extrudeRegion(wasm, rings.get(k) ?? [], pg.w1 - pg.w0, pg.w0, pg.R, crop, partCrop);
+      const a = acc[k];
+      a.area += res.area;
+      a.rings.push(...res.rings);
+      a.plateRings.push(res.rings);
+      if (res.mesh) a.meshes.push(res.mesh);
+      sub.objects.forEach((j, i) => {
+        a.objectMeshes[j] = res.objectMeshes?.[i] ?? null;
+        if (a.partMeshes) a.partMeshes[j] = res.partMeshes?.[i] ?? model.objects[j].parts.map(() => null);
+      });
+    }
+  }
+  const total = acc.reduce((s, a) => s + a.area, 0) || 1;
+  return acc.map((a, k) => ({
+    index: k, rgb: colors[k], hex: toHex(colors[k]), coverage: a.area / total,
+    rings: a.rings, mesh: concatMeshes(a.meshes), objectMeshes: a.objectMeshes, partMeshes: a.partMeshes, plateRings: a.plateRings,
+  }));
 }
 
 /**

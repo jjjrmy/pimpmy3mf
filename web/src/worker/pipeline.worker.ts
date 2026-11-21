@@ -78,8 +78,13 @@ function imageToCanvas(img: RasterImage): OffscreenCanvas {
   return canvas;
 }
 
+// a multi-plate result has one projection per plate (overlapping in uv): the map images show the first plate's
+const mapPlate = (result: Result) => (result.plateProjections?.length ? result.plateProjections[0] : null);
+const mapFrame = (result: Result) => mapPlate(result)?.frame ?? result.frame;
+
 function mapRegions(result: Result, hexes: string[]): MapRegion[] {
-  return result.regions.map((r, i) => ({ rings: r.rings, color: hexes[i] ?? r.hex }));
+  const pp = mapPlate(result);
+  return result.regions.map((r, i) => ({ rings: pp ? (r.plateRings?.[0] ?? []) : r.rings, color: hexes[i] ?? r.hex }));
 }
 
 async function toPng(canvas: OffscreenCanvas): Promise<Uint8Array> {
@@ -88,24 +93,27 @@ async function toPng(canvas: OffscreenCanvas): Promise<Uint8Array> {
 }
 
 async function renderThumbnail(result: Result, hexes: string[]): Promise<Uint8Array> {
-  const { s, w, h } = mapScale(result.frame, 320);
+  const frame = mapFrame(result);
+  const { s, w, h } = mapScale(frame, 320);
   const { canvas, ctx: c2d } = mkOffscreen(w, h);
   c2d.fillStyle = '#ffffff';
   c2d.fillRect(0, 0, w, h);
-  drawColorMap(c2d, mapRegions(result, hexes), result.frame, s);
+  drawColorMap(c2d, mapRegions(result, hexes), frame, s);
   return toPng(canvas);
 }
 
 async function renderPreview(result: Result, hexes: string[], src: RasterImage): Promise<Uint8Array> {
-  const { s, w: mapW, h: mapH } = mapScale(result.frame, 900);
+  const frame = mapFrame(result);
+  const { s, w: mapW, h: mapH } = mapScale(frame, 900);
   const { canvas: map, ctx: mctx } = mkOffscreen(mapW, mapH);
   mctx.fillStyle = '#ffffff';
   mctx.fillRect(0, 0, mapW, mapH);
-  drawColorMap(mctx, mapRegions(result, hexes), result.frame, s);
+  drawColorMap(mctx, mapRegions(result, hexes), frame, s);
   // Cylindrical projection unwraps the model, so a planar silhouette fade doesn't apply there.
   if (result.mode === 'paint' && result.model && result.projection !== 'cylindrical') {
-    const meshes = result.model.objects.flatMap((o, j) => o.parts.map((p, k) => result.shaped?.[j]?.[k] ?? p.mesh));
-    fadeOutsideSilhouette(mctx, mapW, mapH, meshes, result.frame, result.axis, mkOffscreen);
+    const on = mapPlate(result)?.objects;
+    const meshes = result.model.objects.flatMap((o, j) => (on && !on.includes(j) ? [] : o.parts.map((p, k) => result.shaped?.[j]?.[k] ?? p.mesh)));
+    fadeOutsideSilhouette(mctx, mapW, mapH, meshes, frame, result.axis, mkOffscreen);
   }
 
   const left = imageToCanvas(src);

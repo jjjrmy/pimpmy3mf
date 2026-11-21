@@ -1,7 +1,10 @@
 // Plate-centring validation for the Bambu project writer (layoutObjects / centreGroup in src/core/threemf.ts).
 // Four cases go through the real pipeline (3-colour REDURBAN camo) + objectsFromResult + writeBambuProject:
 //   perpart     a 3-part assembly (one object, three 30x30x20 boxes side by side), params.perPart = true
-//   yeti        scratch/centering/yeti.3mf, 7 objects -> several plates
+//   yeti        scratch/centering/yeti.3mf, a 7-plate Bambu project, exported like the app does (sourcePlates: every
+//               object stays on its source plate at its offset from the plate centre, which is <= 0.4 mm here). Its
+//               deepest lids (up to 230 mm) don't fit the A1 mini's 180 mm bed: there the export must warn and Bambu
+//               Studio must refuse to slice it; the centring checks run on X1C / P2S
 //   big-a1mini  one 130x100x15 box (may need a shift for the tower on the A1 mini)
 //   single      one 40 mm box, single plate (regression: still centred)
 // Each is exported for x1c-0.4 (sliced in Bambu Studio 2.8 and 1.10), p2s-0.4 and a1mini-0.4 (2.8), sliced with
@@ -246,7 +249,7 @@ function slice(bin: string, file: string, dir: string): Promise<Slice> {
 
 // ---- run ----------------------------------------------------------------------------------------------------
 
-interface Job { cse: CaseName; printer: string; ver: string; file: string; colors: string[]; info: ProjectInfo; shifts: number[]; warnings: string[] }
+interface Job { cse: CaseName; printer: string; ver: string; file: string; colors: string[]; info: ProjectInfo; shifts: number[]; warnings: string[]; expectReject?: boolean }
 
 async function main() {
   for (const p of [TOWER_PY, YETI, CAMO]) if (!existsSync(p)) throw new Error(`missing ${p}`);
@@ -267,14 +270,19 @@ async function main() {
     if (cse === 'yeti') check('yeti: 7 objects', objects.length === 7, `(${objects.length})`);
     for (const printer of printers) {
       const bedDims = PRINTERS.find((p) => p.id === printer)!.bed as [number, number];
-      const { bytes, warnings, plateShifts } = await writeBambuProject(objects, { printerId: printer, filamentColors: hexes });
+      const src = result.model?.plates;
+      const sourcePlates = src ? { count: src.count, bed: src.bed, bedOrigin: src.bedOrigin, names: src.names } : undefined;
+      const { bytes, warnings, plateShifts } = await writeBambuProject(objects, { printerId: printer, filamentColors: hexes, sourcePlates });
       const file = `${OUT}/${cse}-${printer}.3mf`;
       writeFileSync(file, bytes);
       const info = readProject(bytes, bedDims);
       console.log(`   ${printer}: ${info.nPlates} plate(s), shifts [${plateShifts.map((s) => s.toFixed(1)).join(', ')}]${warnings.length ? `, warnings: ${warnings.join(' | ')}` : ''}`);
       check(`${cse} ${printer}: plateShifts has one entry per plate`, plateShifts.length === info.nPlates, `(${plateShifts.length} vs ${info.nPlates})`);
       check(`${cse} ${printer}: every object placed on a plate`, info.instances === objects.length, `(${info.instances}/${objects.length})`);
-      for (const ver of printer === 'x1c-0.4' ? ['2.8', '1.10'] : ['2.8']) jobs.push({ cse, printer, ver, file, colors: hexes, info, shifts: plateShifts, warnings });
+      if (cse === 'yeti') check(`yeti ${printer}: ${src?.count ?? '?'} source plates kept`, !!src && info.nPlates === src.count, `(${info.nPlates})`);
+      const oversize = cse === 'yeti' && printer === 'a1mini-0.4';
+      if (oversize) check('yeti a1mini-0.4: warns the lids are bigger than the 180 mm bed', warnings.some((w) => /bigger than the 180/.test(w)), warnings.join(' | '));
+      for (const ver of printer === 'x1c-0.4' ? ['2.8', '1.10'] : ['2.8']) jobs.push({ cse, printer, ver, file, colors: hexes, info, shifts: plateShifts, warnings, expectReject: oversize });
     }
   }
 
@@ -314,6 +322,13 @@ async function main() {
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i], s = results[i];
     const label = `${j.cse} ${j.printer} ${j.ver}`;
+    if (j.expectReject) {
+      const sliced = !s.timedOut && s.exit === 0 && (s.returnCode === 0 || s.returnCode === null) && s.plates.length === j.info.nPlates;
+      check(`${label}: oversized plates refused by Bambu Studio`, !sliced,
+        `(exit ${s.exit}, return_code ${s.returnCode}${s.error ? ` "${s.error}"` : ''}, ${s.plates.length}/${j.info.nPlates} gcode plates${s.timedOut ? ', timeout' : ''})`);
+      j.info.plateBoxes.forEach((_, k) => rows.push(`| ${j.cse} | ${j.printer} | ${j.ver} | ${k + 1} | - | - | ${(j.shifts[k] ?? NaN).toFixed(1)} | - | - | ${sliced ? 'FAIL: sliced' : 'PASS (refused, oversized)'} |`));
+      continue;
+    }
     const why: string[] = [];
     if (s.timedOut) why.push(`timeout${s.retried ? ' (after a solo re-run)' : ''}`);
     if (s.exit !== 0) why.push(`exit ${s.exit}`);

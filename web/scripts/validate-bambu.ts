@@ -4,13 +4,15 @@
 // the pipeline lane's loadModel/objectMeshes and fixtures exist) the full pipeline path. Slices each
 // project with the Bambu Studio CLI (no settings flags) and asserts return_code 0, the gcode
 // filament_colour equals the requested colors in order, and every filament actually extrudes. The
-// 200x200 case must surface the no-room-for-tower warning. Multi-object cases additionally assert the
+// 200x200 case leaves no room for the prime tower on a centred plate: the writer must shift it (a recorded plate
+// shift > 0, no warning) so it slices with the tower on the bed and clear of it. Example-folder cases whose
+// fixtures are missing print "SKIP (fixture missing)". Multi-object cases additionally assert the
 // model_settings object/part structure. A few plates are rendered top-down for eyeballing; a
 // ~1M-triangle mesh exercises the chunked writer.
 //
 //   bun scripts/validate-bambu.ts            # everything
 //   bun scripts/validate-bambu.ts syn sweep  # only cases whose name contains "syn" or "sweep"
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { unzipSync, zipSync } from 'fflate';
@@ -28,6 +30,7 @@ const OUT = `${ROOT}/scratch/bambu/out`;
 const RENDER = `${ROOT}/scripts/render-gcode.py`;
 const PY = process.env.PYTHON ?? 'python3';
 const EXAMPLES = process.env.EXAMPLES ?? `${ROOT}/scratch/examples`;
+const TOWER_PY = `${ROOT}/scratch/bambu/excl/tower_extents.py`;
 const PALETTE = ['#C21807', '#1F7A1F', '#2040C0', '#E0B000', '#7A3FA0', '#17A2A2', '#E06A00', '#303030'];
 
 const filter = process.argv.slice(2);
@@ -213,6 +216,32 @@ function sliceAndParse(file: string, tag: string): SliceResult {
   const gcode = `${dir}/plate_1.gcode`;
   const parsed = existsSync(gcode) ? parseGcodeFile(gcode) : { colors: [], extrudePerTool: new Map<number, number>() };
   return { returnCode, error, ...parsed };
+}
+
+/** Non-tower, non-skirt object extrusion bbox of one plate's G-code (as validate-plates / validate-tower). */
+function objectExtents(gcode: string): { x0: number; y0: number; x1: number; y1: number } | null {
+  let inTower = false, feat = '', x = 0, y = 0;
+  let b: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  const grow = (px: number, py: number) => {
+    b = b ? { x0: Math.min(b.x0, px), y0: Math.min(b.y0, py), x1: Math.max(b.x1, px), y1: Math.max(b.y1, py) } : { x0: px, y0: py, x1: px, y1: py };
+  };
+  for (const raw of readFileSync(gcode, 'utf8').split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith(';')) {
+      if (line === '; WIPE_TOWER_START') inTower = true;
+      else if (line === '; WIPE_TOWER_END') inTower = false;
+      else if (line.toLowerCase().startsWith('; feature:')) feat = line.slice(10).trim().toLowerCase();
+      continue;
+    }
+    if (!/^G[0-3] /.test(line)) continue;
+    const px = x, py = y;
+    const mx = line.match(/X(-?[0-9.]+)/), my = line.match(/Y(-?[0-9.]+)/);
+    if (mx) x = parseFloat(mx[1]);
+    if (my) y = parseFloat(my[1]);
+    const em = line.match(/\bE(-?[0-9.]+)/);
+    if (em && (mx || my) && parseFloat(em[1]) > 0 && !inTower && feat && !/tower|skirt|brim|custom|prime/.test(feat)) { grow(px, py); grow(x, y); }
+  }
+  return b;
 }
 
 /** Slice all plates; return the overall rc plus per-plate parse of each plate_N.gcode. */
@@ -451,25 +480,53 @@ async function main() {
 
   // ---- 200x200 tower-warning case
   if (want('big200')) {
-    console.log('\n# big200 (200x200, expect tower warning)');
+    console.log('\n# big200 (200x200: shifted for the tower, no warning)');
     const colors = PALETTE.slice(0, 3);
-    const { warnings, bytes } = await writeBambuProject([stripObject('big', 3, 200, 200, 1)], { printerId: 'p2s-0.4', filamentColors: colors });
-    writeFileSync(`${OUT}/big200.3mf`, bytes);
-    check('big200: emits tower warning', warnings.length > 0, `(warnings: ${JSON.stringify(warnings)})`);
+    const { warnings, bytes, plateShifts } = await writeBambuProject([stripObject('big', 3, 200, 200, 1)], { printerId: 'p2s-0.4', filamentColors: colors });
+    const file = `${OUT}/big200.3mf`;
+    writeFileSync(file, bytes);
+    check('big200: no warning (shifted to make room for the tower)', warnings.length === 0, `(warnings: ${JSON.stringify(warnings)})`);
+    check('big200: plate shift recorded > 0', plateShifts.length === 1 && plateShifts[0] > 0, `(plateShifts ${JSON.stringify(plateShifts)})`);
+    const dir = `${OUT}/big200-slice`;
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const sp = spawnSync(BAMBU, ['--slice', '0', '--outputdir', dir, file], { encoding: 'utf8', timeout: 300000 });
+    const rc = existsSync(`${dir}/result.json`) ? JSON.parse(readFileSync(`${dir}/result.json`, 'utf8')).return_code : null;
+    check('big200: slice exit 0, return_code 0', sp.status === 0 && rc === 0, `(exit ${sp.status}${sp.signal ? ` ${sp.signal}` : ''}, return_code ${rc})`);
+    const gcode = `${dir}/plate_1.gcode`;
+    if (!existsSync(TOWER_PY)) console.log('   SKIP (fixture missing): big200 tower extents need scratch/bambu/excl/tower_extents.py');
+    else if (existsSync(gcode)) {
+      const m = execFileSync('python3', ['-I', TOWER_PY, gcode], { encoding: 'utf8' }).match(/\(([-\d.]+), ([-\d.]+), ([-\d.]+), ([-\d.]+)\)/);
+      const tower = m ? { x0: +m[1], y0: +m[2], x1: +m[3], y1: +m[4] } : null;
+      const objBox = objectExtents(gcode);
+      const area = (JSON.parse(new TextDecoder().decode(unzipSync(bytes)['Metadata/project_settings.config'])).printable_area as string[])
+        .map((v) => v.split('x').map(Number));
+      const bed = { x0: Math.min(...area.map((p) => p[0])), y0: Math.min(...area.map((p) => p[1])), x1: Math.max(...area.map((p) => p[0])), y1: Math.max(...area.map((p) => p[1])) };
+      const onBed = !!tower && tower.x0 >= bed.x0 && tower.y0 >= bed.y0 && tower.x1 <= bed.x1 && tower.y1 <= bed.y1;
+      const gap = tower && objBox ? Math.max(objBox.x0 - tower.x1, tower.x0 - objBox.x1, objBox.y0 - tower.y1, tower.y0 - objBox.y1) : null;
+      const where = `tower ${tower ? `[${tower.x0},${tower.y0}-${tower.x1},${tower.y1}]` : 'none'}, object ${objBox ? `[${objBox.x0.toFixed(1)},${objBox.y0.toFixed(1)}-${objBox.x1.toFixed(1)},${objBox.y1.toFixed(1)}]` : 'none'}, bed [${bed.x0},${bed.y0}-${bed.x1},${bed.y1}]`;
+      check('big200: prime tower on the bed', onBed, `(${where})`);
+      check('big200: prime tower clear of the object', gap !== null && gap > 0, `(gap ${gap?.toFixed(1) ?? '-'} mm; ${where})`);
+    } else check('big200: plate_1.gcode written', false);
   }
 
   // ---- real example images
-  if (want('REDURBAN')) {
+  const fixture = (name: string, dir: string) => {
+    if (existsSync(dir)) return true;
+    console.log(`\n# ${name}\n   SKIP (fixture missing): ${dir}`);
+    return false;
+  };
+  if (want('REDURBAN') && fixture('REDURBAN', `${EXAMPLES}/REDURBAN-3colors`)) {
     const { object, colors } = imageExampleObject(`${EXAMPLES}/REDURBAN-3colors`, 'REDURBAN (3 colors)');
     await sliceCase('REDURBAN', [object], colors, true);
   }
-  if (want('wide-urban')) {
+  if (want('wide-urban') && fixture('wide-urban', `${EXAMPLES}/wide-urban-4colors`)) {
     const { object, colors } = imageExampleObject(`${EXAMPLES}/wide-urban-4colors`, 'wide-urban (4 colors)');
     await sliceCase('wide-urban', [object], colors, true);
   }
 
   // ---- paint example (single model object)
-  if (want('paint-example')) {
+  if (want('paint-example') && fixture('paint-example', `${EXAMPLES}/paint-example`)) {
     const { object, colors } = paintExampleObject(`${EXAMPLES}/paint-example`);
     await sliceCase('paint-example', [obj('box', object.parts)], colors, true);
   }

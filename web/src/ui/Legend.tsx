@@ -130,6 +130,17 @@ function SuggestionStrip({
 
 const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
+/** Multi-plate: "7 plates · 93–254 × 94 mm" (each plate's own pattern size, as a range), else null. */
+function plateSize(result: Result): string | null {
+  const pp = result.plateProjections;
+  if (!pp?.length) return null;
+  const span = (xs: number[]) => {
+    const lo = Math.min(...xs), hi = Math.max(...xs);
+    return hi - lo < 0.05 ? lo.toFixed(1) : `${lo.toFixed(1)}–${hi.toFixed(1)}`;
+  };
+  return `${pp.length} plates · ${span(pp.map((p) => p.tile.w))} × ${span(pp.map((p) => p.tile.h))} mm`;
+}
+
 function normalizeHex(value: string): string | null {
   const v = value.trim();
   if (!HEX_RE.test(v)) return null;
@@ -275,7 +286,7 @@ export function StatusLine({ error, result, stale = false }: StatusLineProps) {
   return (
     <div className={`status${stale ? ' is-stale' : ''}`}>
       <span>
-        {result.regions.length} colors · {tile.w.toFixed(1)} × {tile.h.toFixed(1)} mm
+        {result.regions.length} colors · {plateSize(result) ?? `${tile.w.toFixed(1)} × ${tile.h.toFixed(1)} mm`}
         {result.mode === 'paint' ? (tile.repeat ? ' (tiled)' : ' (stretched)') : ''}
       </span>
       <span className="status-dim">
