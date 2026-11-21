@@ -131,6 +131,8 @@ export function composeAssembly(items: AssemblyItem[], skip?: Set<string>): Comp
           name: o.name,
           parts: o.parts.map((p) => ({ name: p.name, mesh: ident ? p.mesh : transformMesh(p.mesh, it.transform) })),
         })),
+        // build plates only hold while the file sits where it was loaded (a moved file no longer lines up)
+        ...(it.model.plates && ident ? { plates: it.model.plates } : {}),
       },
       sources: it.model.objects.map((o, j) => o.parts.map((_, k) => ({ itemId: it.id, object: j, part: k }))),
       partItem: it.model.objects.flatMap((o) => o.parts.map(() => items.indexOf(it))),

@@ -263,5 +263,6 @@ export function orientModelLike(model: Model, ref: Model, R: number[] | null): M
         return { name: p.name, mesh: { vertices: out, triangles: p.mesh.triangles } };
       }),
     })),
+    ...(model.plates ? { plates: model.plates } : {}),
   };
 }

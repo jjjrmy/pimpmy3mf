@@ -29,6 +29,8 @@ export interface SavedState {
   paintedFaces: PaintedFace[];
   textures: FaceTexture[];
   orientation: number[] | null;
+  /** Multi-plate projects: lay-on-face per plate (missing in sessions saved before it existed). */
+  plateOrientations?: (number[] | null)[] | null;
   image: { blob: Blob; name: string; presetId: string | null } | null;
   /** Per-part modifiers, and whether the user set it ('user') or it came on with a second file ('auto'). */
   perPart?: boolean;

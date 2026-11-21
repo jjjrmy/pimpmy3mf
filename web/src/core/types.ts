@@ -130,6 +130,25 @@ export interface ModelObject {
  */
 export interface Model {
   objects: ModelObject[];
+  /** A Bambu / Orca project with 2+ build plates: which plate each object sits on. Absent = one plate. */
+  plates?: ModelPlates;
+}
+
+/**
+ * Build plates of a multi-plate Bambu / Orca project. Objects stay in world coordinates, laid out on Bambu's plate
+ * grid: plate p (0-based) has its origin at (col·1.2·bed[0], −row·1.2·bed[1]), col = p % cols, row = ⌊p / cols⌋,
+ * cols = ⌈√count⌉ (plateCellOrigin in src/core/plates.ts).
+ */
+export interface ModelPlates {
+  /** Number of plates, empty ones included. */
+  count: number;
+  /** 0-based plate per model.objects index. */
+  objectPlate: number[];
+  /** The source printer's printable area size [w, h] (mm) and its min corner (plate-local). */
+  bed: [number, number];
+  bedOrigin: [number, number];
+  /** Per plate: its name in the slicer ('' = unnamed). */
+  names: string[];
 }
 
 export interface Params {
@@ -165,6 +184,12 @@ export interface Params {
    * untouched. Set by lay-on-face. Projection, crops and exports all use the re-oriented model.
    */
   orientation: number[] | null;
+  /**
+   * Paint mode, multi-plate models (model.plates) only, instead of `orientation`: one rotation per plate (null =
+   * as loaded). Each plate's objects rotate together about their bbox centre, keep their XY centre and drop to
+   * min z = 0; other plates stay put. Missing / null = all as loaded.
+   */
+  plateOrientations?: (number[] | null)[] | null;
   /** Paint mode: faces printed solid in one color ~1 mm deep (later entries win where they overlap). */
   paintedFaces: PaintedFace[];
   /**
@@ -214,6 +239,7 @@ export const DEFAULT_PARAMS: Params = {
   axis: 'y',
   projection: 'planar',
   orientation: null,
+  plateOrientations: null,
   paintedFaces: [],
   rotation: 0,
   offsetX: 0,
@@ -283,6 +309,8 @@ export interface Result {
   cylinder: CylinderFrame | null;
   /** Echo of params.orientation for this result (null = as loaded). result.model is already in this pose. */
   orientation: number[] | null;
+  /** Echo of params.plateOrientations (multi-plate models; null otherwise). result.model is already in this pose. */
+  plateOrientations?: (number[] | null)[] | null;
   /**
    * The rigid motion lay-on-face applied (as-loaded -> result.model: x' = R·x + t), null when not oriented. Lets the
    * assemble tool map picks back to assembly space.
@@ -371,6 +399,8 @@ export interface Part {
 export interface ExportObject {
   name: string;
   parts: Part[];
+  /** Multi-plate source (result.model.plates): the 0-based plate of its source object (per-part splits inherit it). */
+  plate?: number;
 }
 
 /** One printer + nozzle combination backed by a captured, slice-validated Bambu template. */
@@ -400,4 +430,9 @@ export interface BambuProjectOptions {
   plate?: string;
   /** Optional PNG shown as the plate thumbnail in Bambu Studio. */
   thumbnailPng?: Uint8Array;
+  /**
+   * Multi-plate source (result.model.plates minus objectPlate; objects carry ExportObject.plate): keep every object
+   * on its plate at its offset from the plate centre, instead of packing.
+   */
+  sourcePlates?: Omit<ModelPlates, 'objectPlate'>;
 }

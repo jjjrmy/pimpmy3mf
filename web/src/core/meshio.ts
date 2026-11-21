@@ -2,7 +2,8 @@
 // Bambu modifier parts skipped), and write binary STL. Ports img2color.py load_stl/obj/3mf + weld +
 // write_stl. 3MF uses fflate + a regex tag scanner (no DOMParser) so it runs in a Web Worker.
 import { unzipSync } from 'fflate';
-import type { Mesh, Model, ModelObject, ModelPart } from './types';
+import type { Mesh, Model, ModelObject, ModelPart, ModelPlates } from './types';
+import { plateAt } from './plates';
 
 // ------------------------------------------------------------------------------------------- weld
 /** Weld per-corner coords (flat xyz, N verts) into an indexed mesh via a numeric spatial hash. */
@@ -229,6 +230,49 @@ function parseModelSettings(text: string): Map<string, CfgObject> {
   return cfg;
 }
 
+interface CfgPlate { id: number; name: string; instances: { objectId: string; instanceId: number }[] }
+
+/** Bambu / Orca model_settings <plate> blocks: plater_id, plater_name and the objects (instances) on each. */
+function parsePlates(text: string): CfgPlate[] {
+  const out: CfgPlate[] = [];
+  const plateRe = /<plate>([\s\S]*?)<\/plate>/g;
+  const meta = (body: string, key: string): string | null => {
+    const m = body.match(new RegExp(`<metadata\\b[^>]*\\bkey="${key}"[^>]*\\bvalue="([^"]*)"`));
+    return m ? unescapeXml(m[1]) : null;
+  };
+  let pm: RegExpExecArray | null;
+  while ((pm = plateRe.exec(text))) {
+    const body = pm[1];
+    const instances: CfgPlate['instances'] = [];
+    const instRe = /<model_instance>([\s\S]*?)<\/model_instance>/g;
+    let im: RegExpExecArray | null;
+    while ((im = instRe.exec(body))) {
+      const oid = meta(im[1], 'object_id');
+      if (oid) instances.push({ objectId: oid, instanceId: parseInt(meta(im[1], 'instance_id') ?? '0', 10) || 0 });
+    }
+    // plate metadata sits before the first instance
+    const head = body.split('<model_instance>')[0];
+    out.push({ id: parseInt(meta(head, 'plater_id') ?? String(out.length + 1), 10) || out.length + 1, name: meta(head, 'plater_name') ?? '', instances });
+  }
+  return out.sort((a, b) => a.id - b.id);
+}
+
+/** The source printer's printable area from Metadata/project_settings.config: [w, h] and min corner (default 256²). */
+function sourceBed(text: string | null): { bed: [number, number]; origin: [number, number] } {
+  try {
+    const area = text ? (JSON.parse(text) as Record<string, unknown>).printable_area : null;
+    const pts = (Array.isArray(area) ? area : [])
+      .map((s) => String(s).split('x').map(parseFloat))
+      .filter((q) => q.length === 2 && q.every(Number.isFinite));
+    if (pts.length >= 3) {
+      const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+      const x0 = Math.min(...xs), y0 = Math.min(...ys), x1 = Math.max(...xs), y1 = Math.max(...ys);
+      if (x1 > x0 && y1 > y0) return { bed: [x1 - x0, y1 - y0], origin: [x0, y0] };
+    }
+  } catch { /* not JSON (old INI-style config): default */ }
+  return { bed: [256, 256], origin: [0, 0] };
+}
+
 function worldMesh(o: { v: Float64Array; t: Int32Array }, tf: Tf): Mesh {
   const nv = o.v.length / 3;
   const vertices = new Float32Array(o.v.length);
@@ -253,9 +297,10 @@ function load3mfModel(bytes: Uint8Array, stem: string): Model {
     if (m) root = m[1];
   }
 
-  const cfg = names.has('Metadata/model_settings.config')
-    ? parseModelSettings(dec.decode(files['Metadata/model_settings.config']))
-    : new Map<string, CfgObject>();
+  const settingsText = names.has('Metadata/model_settings.config') ? dec.decode(files['Metadata/model_settings.config']) : null;
+  const cfg = settingsText ? parseModelSettings(settingsText) : new Map<string, CfgObject>();
+  // Bambu / Orca build plates. PrusaSlicer multi-bed and other formats carry none: loaded as one plate.
+  const cfgPlates = settingsText ? parsePlates(settingsText) : [];
 
   const cache = new Map<string, ReturnType<typeof parseModelFile>>();
   const parse = (mp: string) => {
@@ -280,8 +325,13 @@ function load3mfModel(bytes: Uint8Array, stem: string): Model {
 
   const { build } = parse(root);
   const objects: ModelObject[] = [];
+  /** Per objects index: its build item's root object id and instance index among items sharing that id. */
+  const objectItem: { objectId: string; instance: number }[] = [];
+  const seenInstances = new Map<string, number>();
 
   build.forEach((item, j) => {
+    const instance = seenInstances.get(item.objectid) ?? 0;
+    seenInstances.set(item.objectid, instance + 1);
     const rootId = item.objectid;
     const rootObj = parse(root).objs.get(rootId);
     if (!rootObj) return;
@@ -309,11 +359,35 @@ function load3mfModel(bytes: Uint8Array, stem: string): Model {
       }
     }
 
-    if (parts.length > 0) objects.push({ name: objName, parts });
+    if (parts.length > 0) {
+      objects.push({ name: objName, parts });
+      objectItem.push({ objectId: rootId, instance });
+    }
   });
 
   if (objects.length === 0) throw new Error('no printable meshes found in 3MF');
-  return { objects };
+  if (cfgPlates.length < 2) return { objects };
+
+  const src = sourceBed(names.has('Metadata/project_settings.config') ? dec.decode(files['Metadata/project_settings.config']) : null);
+  const where = new Map<string, number>();
+  cfgPlates.forEach((pl, p) => pl.instances.forEach((ins) => where.set(`${ins.objectId}:${ins.instanceId}`, p)));
+  const grid = { count: cfgPlates.length, bed: src.bed, bedOrigin: src.origin, names: cfgPlates.map((pl) => pl.name) };
+  const objectPlate = objects.map((o, j) => {
+    const listed = where.get(`${objectItem[j].objectId}:${objectItem[j].instance}`);
+    if (listed !== undefined) return listed;
+    // not listed on any plate: the plate whose grid cell holds its bbox centre
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of o.parts) {
+      const v = p.mesh.vertices;
+      for (let i = 0; i < v.length; i += 3) {
+        if (v[i] < x0) x0 = v[i]; if (v[i] > x1) x1 = v[i];
+        if (v[i + 1] < y0) y0 = v[i + 1]; if (v[i + 1] > y1) y1 = v[i + 1];
+      }
+    }
+    return Math.max(0, plateAt(grid, (x0 + x1) / 2, (y0 + y1) / 2));
+  });
+  const plates: ModelPlates = { ...grid, objectPlate };
+  return { objects, plates };
 }
 
 // ------------------------------------------------------------------------------------- dispatch

@@ -730,6 +730,7 @@ export async function applyTextures(
           return w ? { name: p.name, mesh: { vertices: Float32Array.from(w.pos), triangles: Uint32Array.from(w.tris) } } : p;
         }),
       })),
+      ...(model.plates ? { plates: model.plates } : {}),
     },
     changed, applied, warnings,
   };

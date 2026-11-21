@@ -15,6 +15,7 @@ import { zipSync } from 'fflate';
 import type { BambuProjectOptions, ExportObject, FaceSkin, Mesh, Part, PrinterPreset, Result } from './types';
 import { flushMatrix } from './bambu/flush';
 import { loadTemplate, type BambuTemplate } from './bambu/template';
+import { plateCellOrigin, plateCentre, PLATE_PITCH } from './plates';
 
 /**
  * Supported printer × nozzle combos; the first entry is the default (Bambu Lab P2S 0.4 nozzle).
@@ -303,7 +304,7 @@ function buildModelSettings(
   objects: ExportObject[],
   ids: ObjectIds[],
   withMatrix: boolean,
-  plate?: { objectPlate: number[]; nPlates: number; thumbnailFile?: string },
+  plate?: { objectPlate: number[]; nPlates: number; names?: string[]; thumbnailFile?: string },
 ): string {
   const lines: string[] = ['<?xml version="1.0" encoding="UTF-8"?>', '<config>'];
   objects.forEach((o, k) => {
@@ -323,7 +324,7 @@ function buildModelSettings(
     for (let p = 0; p < plate.nPlates; p++) {
       lines.push(' <plate>');
       lines.push(`  <metadata key="plater_id" value="${p + 1}"/>`);
-      lines.push('  <metadata key="plater_name" value=""/>');
+      lines.push(`  <metadata key="plater_name" value="${xmlEscape(plate.names?.[p] ?? '')}"/>`);
       lines.push('  <metadata key="locked" value="false"/>');
       lines.push('  <metadata key="filament_map_mode" value="Auto For Flush"/>');
       lines.push('  <metadata key="gcode_file" value=""/>');
@@ -390,6 +391,8 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
   if (result.mode === 'paint') {
     if (!result.model) throw new Error('paint mode result has no model');
     const baseColor = colorOf(0, result.regions[0]?.hex);
+    const srcPlates = result.model.plates;
+    const plateOf = (j: number): { plate?: number } => (srcPlates ? { plate: srcPlates.objectPlate[j] ?? 0 } : {});
 
     // Per-part mode (params.perPart): one output object per input PART (across all input objects), each
     // carrying its own cropped modifiers, so the texture travels with the part when re-oriented in Bambu.
@@ -408,7 +411,7 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
           result.faceSkins.forEach((s, si) => {
             if (s.objectIndex === j && s.partIndex === k) parts.push(skinPart(s, si));
           });
-          out.push({ name: mp.name, parts });
+          out.push({ name: mp.name, parts, ...plateOf(j) });
         });
       });
       return out;
@@ -434,7 +437,7 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
       result.faceSkins.forEach((s, si) => {
         if (s.objectIndex === j) parts.push(skinPart(s, si));
       });
-      return { name: obj.name, parts };
+      return { name: obj.name, parts, ...plateOf(j) };
     });
   }
 
@@ -458,7 +461,10 @@ export function objectsFromResult(result: Result, hexes: string[], imageName: st
   return [{ name: `${imageName} (${result.regions.length} colors)`, parts }];
 }
 
-/** Plain 3MF: one 3MF object per ExportObject; part extruder/subtype in Metadata/model_settings.config. */
+/**
+ * Plain 3MF: one 3MF object per ExportObject; part extruder/subtype in Metadata/model_settings.config.
+ * Plain 3MF has no plate concept: a multi-plate project's objects keep their source plate-grid world positions.
+ */
 export function writePlain3mf(objects: ExportObject[]): Uint8Array {
   requireObjects(objects);
   const { model, ids } = buildPlainModel(objects);
@@ -629,14 +635,19 @@ function findTowerSpot(t: TowerSpec, occupied: Rect[]): { x: number; y: number }
  * one. Returns the offset to apply to the rects, the tower spot (null if none even after shifting) and how far the
  * group was moved off centre (0 = centred).
  */
-function centreGroup(rects: Rect[], spec: TowerSpec): { dx: number; dy: number; spot: { x: number; y: number } | null; shift: number } {
+function centreGroup(
+  rects: Rect[],
+  spec: TowerSpec,
+  keep = false,
+): { dx: number; dy: number; spot: { x: number; y: number } | null; shift: number } {
   const g = {
     x0: Math.min(...rects.map((r) => r.x0)), y0: Math.min(...rects.map((r) => r.y0)),
     x1: Math.max(...rects.map((r) => r.x1)), y1: Math.max(...rects.map((r) => r.y1)),
   };
   const b = spec.bed;
-  const dx0 = (b.x0 + b.x1) / 2 - (g.x0 + g.x1) / 2;
-  const dy0 = (b.y0 + b.y1) / 2 - (g.y0 + g.y1) / 2;
+  // keep: start from where the group already is (a multi-plate project's own layout) instead of the centre
+  const dx0 = keep ? 0 : (b.x0 + b.x1) / 2 - (g.x0 + g.x1) / 2;
+  const dy0 = keep ? 0 : (b.y0 + b.y1) / 2 - (g.y0 + g.y1) / 2;
   const at = (dx: number, dy: number): Rect[] => rects.map((r) => ({ x0: r.x0 + dx, y0: r.y0 + dy, x1: r.x1 + dx, y1: r.y1 + dy }));
   const spot = findTowerSpot(spec, at(dx0, dy0));
   if (spot || spec.size[0] <= 0) return { dx: dx0, dy: dy0, spot, shift: 0 };
@@ -681,7 +692,7 @@ interface Layout {
   shifts: number[];
 }
 
-const PLATE_GAP = 1.2; // Bambu's plate-grid spacing is 1.2 x bed
+const PLATE_GAP = PLATE_PITCH; // Bambu's plate-grid spacing is 1.2 x bed
 
 /**
  * Keep the assembled layout (one shared translation, union centred, min z = 0) when all objects sit
@@ -812,6 +823,90 @@ function layoutObjects(objects: ExportObject[], bed: [number, number], spec: Tow
   return { transforms, plates, objectPlate, rearranged: true, warnings, shifts };
 }
 
+/**
+ * Multi-plate source: every object stays on its plate. Each one moves from its source plate cell to the same plate
+ * of the target printer's grid, keeping its XY offset from the plate centre, dropped to z = 0. A plate whose group
+ * no longer sits inside the printable area (5 mm margin) is centred instead; one whose prime tower has no room is
+ * moved the least needed (centreGroup). Empty plates are kept. null when two objects on one plate overlap in XY
+ * (e.g. per-part splits of one object): the caller re-arranges instead. shifts = mm each plate's group moved off
+ * the project's own layout (0 = kept as it was).
+ */
+function layoutPlates(
+  objects: ExportObject[],
+  bed: [number, number],
+  spec: TowerSpec,
+  src: NonNullable<BambuProjectOptions['sourcePlates']>,
+): Layout | null {
+  const trim = (n: number): string => Number(n.toFixed(5)).toString();
+  const xform = (tx: number, ty: number, tz: number): string => `1 0 0 0 1 0 0 0 1 ${trim(tx)} ${trim(ty)} ${trim(tz)}`;
+  const count = Math.max(src.count, ...objects.map((o) => (o.plate ?? 0) + 1));
+  const plateOf = objects.map((o) => Math.min(Math.max(0, o.plate ?? 0), count - 1));
+  const bounds = objects.map(objectBounds);
+  for (let i = 0; i < objects.length; i++)
+    for (let j = i + 1; j < objects.length; j++) {
+      if (plateOf[i] !== plateOf[j]) continue;
+      const a = bounds[i], b = bounds[j];
+      if (a.minX < b.maxX && b.minX < a.maxX && a.minY < b.maxY && b.minY < a.maxY) return null;
+    }
+  const grid = { ...src, count };
+  const tcx = (spec.bed.x0 + spec.bed.x1) / 2, tcy = (spec.bed.y0 + spec.bed.y1) / 2;
+  // plate-local target rect of each object: same offset from the plate centre as in the source project
+  const local = bounds.map((b, i) => {
+    const [cx, cy] = plateCentre(grid, plateOf[i]);
+    return { x0: b.minX - cx + tcx, y0: b.minY - cy + tcy, x1: b.maxX - cx + tcx, y1: b.maxY - cy + tcy };
+  });
+  const m = 5;
+  const exTop = Math.max(0, ...spec.exclude.flat().map((p) => p[1]));
+  const plates: Layout['plates'] = [];
+  const shifts: number[] = [];
+  const moved: [number, number][] = [];
+  const recentred: number[] = [], crowded: number[] = [], tooBig: number[] = [];
+  for (let p = 0; p < count; p++) {
+    const idx = plateOf.flatMap((q, i) => (q === p ? [i] : []));
+    if (!idx.length) {
+      const spot = findTowerSpot(spec, []);
+      plates.push(spot ? { towerX: spot.x, towerY: spot.y } : { towerX: 5, towerY: exTop > 0 ? exTop + spec.brim + 5 : 10 });
+      shifts.push(0);
+      moved.push([0, 0]);
+      continue;
+    }
+    const rects = idx.map((i) => local[i]);
+    const g = {
+      x0: Math.min(...rects.map((r) => r.x0)), y0: Math.min(...rects.map((r) => r.y0)),
+      x1: Math.max(...rects.map((r) => r.x1)), y1: Math.max(...rects.map((r) => r.y1)),
+    };
+    const inside = g.x0 >= spec.bed.x0 + m && g.y0 >= spec.bed.y0 + m && g.x1 <= spec.bed.x1 - m && g.y1 <= spec.bed.y1 - m;
+    if (g.x1 - g.x0 > bed[0] - 2 * m || g.y1 - g.y0 > bed[1] - 2 * m) tooBig.push(p + 1);
+    else if (!inside) recentred.push(p + 1);
+    const c = centreGroup(rects, spec, inside);
+    if (!c.spot && spec.size[0] > 0) crowded.push(p + 1);
+    plates.push(c.spot ? { towerX: c.spot.x, towerY: c.spot.y } : { towerX: 5, towerY: exTop > 0 ? exTop + spec.brim + 5 : 10 });
+    moved.push([c.dx, c.dy]);
+    shifts.push(Math.round(Math.hypot(c.dx, c.dy) * 100) / 100);
+  }
+  const transforms = objects.map((_, i) => {
+    const p = plateOf[i];
+    const [ox, oy] = plateCellOrigin(p, count, bed);
+    const b = bounds[i], r = local[i];
+    return xform(ox + r.x0 + moved[p][0] - b.minX, oy + r.y0 + moved[p][1] - b.minY, -b.minZ);
+  });
+  const list = (ps: number[]): string => `plate${ps.length > 1 ? 's' : ''} ${ps.join(', ')}`;
+  const warnings: string[] = [];
+  if (recentred.length) {
+    warnings.push(`The objects on ${list(recentred)} didn’t fit where they were on the ${bed[0].toFixed(0)} × ${bed[1].toFixed(0)} mm bed, so they were centred on it.`);
+  }
+  if (tooBig.length) {
+    warnings.push(
+      `The objects on ${list(tooBig)} are bigger than the ${bed[0].toFixed(0)} × ${bed[1].toFixed(0)} mm bed. ` +
+        'They may not slice; try scaling down in Bambu Studio.',
+    );
+  }
+  if (crowded.length) {
+    warnings.push(`There was no free spot for the prime tower on ${list(crowded)}. Bambu Studio may report a conflict; drag the tower to a clear spot there.`);
+  }
+  return { transforms, plates, objectPlate: plateOf, rearranged: false, warnings, shifts };
+}
+
 /** Full Bambu Studio project: presets, filament colors, assembly laid out on one or more plates
  * (relative layout kept when it fits, else re-arranged), prime tower placed per plate. */
 export async function writeBambuProject(
@@ -857,8 +952,13 @@ export async function writeBambuProject(
     : { x0: 0, y0: 0, x1: tmpl.bed[0], y1: tmpl.bed[1] };
   const spec: TowerSpec = { size: tower, brim: num('prime_tower_brim_width', 3), bed: bedRect, exclude: exclusionPolys(settings) };
 
-  const layout = layoutObjects(objects, tmpl.bed, spec);
-  const warnings = layout.warnings;
+  const kept = opts.sourcePlates && objects.some((o) => o.plate !== undefined) ? layoutPlates(objects, tmpl.bed, spec, opts.sourcePlates) : null;
+  const layout = kept ?? layoutObjects(objects, tmpl.bed, spec);
+  const warnings = layout.warnings.slice();
+  if (opts.sourcePlates && !kept) {
+    warnings.unshift(`Some objects overlap on one of the project’s ${opts.sourcePlates.count} plates, so its plate layout couldn’t be kept.`);
+  }
+  const plateNames = kept ? opts.sourcePlates!.names : undefined;
   // per-plate prime-tower positions (one list entry per plate)
   settings.wipe_tower_x = layout.plates.map((p) => String(p.towerX));
   settings.wipe_tower_y = layout.plates.map((p) => String(p.towerY));
@@ -869,6 +969,7 @@ export async function writeBambuProject(
   const modelSettings = buildModelSettings(objects, ids, true, {
     objectPlate: layout.objectPlate,
     nPlates: layout.plates.length,
+    names: plateNames,
     thumbnailFile: hasThumb ? 'Metadata/plate_1.png' : undefined,
   });
   const sliceInfo =

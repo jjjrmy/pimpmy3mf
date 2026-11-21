@@ -12,7 +12,7 @@ import { createPipeline } from '../core/pipeline';
 import { initManifold } from '../core/manifold';
 import { loadModel, writeStl } from '../core/meshio';
 import { objectsFromResult, writeBambuProject, writePlain3mf } from '../core/threemf';
-import type { Model, Pipeline, RasterImage, Result } from '../core/types';
+import type { Model, ModelPlates, Pipeline, RasterImage, Result } from '../core/types';
 
 import { drawColorMap, fadeOutsideSilhouette, mapScale, type MapRegion } from '../ui/colorMap';
 import type { ExportOpts, ExportResult, ModelInfo, Request, Response, RunLayout } from './messages';
@@ -161,6 +161,7 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
         filamentColors: hexes,
         plate: opts.plate,
         thumbnailPng,
+        ...(result.model?.plates ? { sourcePlates: sourcePlatesOf(result.model.plates) } : {}),
       });
       // an assembly split per part is expected to be laid out flat and apart: say so instead of flagging it
       const warnings =
@@ -182,6 +183,8 @@ async function doExport(result: Result, kind: string, opts: ExportOpts): Promise
       throw new Error(`Unknown export kind: ${kind}`);
   }
 }
+
+const sourcePlatesOf = ({ count, bed, bedOrigin, names }: ModelPlates) => ({ count, bed, bedOrigin, names });
 
 // ---- assembly -------------------------------------------------------------------------------
 
@@ -209,6 +212,7 @@ function recompose(): ModelInfo {
     triangles: countTriangles(model),
     objects: model.objects.map((o) => ({ name: o.name, parts: o.parts.map((p) => p.name) })),
     sources: composed.sources,
+    ...(model.plates ? { plates: model.plates.count } : {}),
     items: items.map((it) => ({
       itemId: it.id,
       fileName: it.fileName,

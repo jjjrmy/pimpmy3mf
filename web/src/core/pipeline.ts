@@ -13,6 +13,7 @@ import { trace } from './trace';
 import { extrudeRegion, type CropBox } from './extrude';
 import { cylFrame, extrudeRegionsCyl } from './cylindrical';
 import { orientModelLike, orientPlacement } from './faces';
+import { orientPlatesLike } from './plates';
 import { buildFaceSkins, subtractSkins, type SkinExtent } from './skins';
 import { applyTextures, textureKey } from './texture';
 import type { FaceTexture } from './types';
@@ -204,11 +205,21 @@ export function createPipeline(): Pipeline {
 
     // ---- stage 0b: re-orient (lay-on-face). Textured and original share one transform, placed from the textured
     // shape; everything geometric uses the textured model, result.model / picking / skins the original ----
-    const orientKey = params.orientation ? params.orientation.map((x) => x.toFixed(9)).join(',') : '';
+    // a multi-plate model lays each plate on its own (plateOrientations); params.orientation is not used there
+    const plates = srcModel?.plates;
+    const plateRs = plates ? (params.plateOrientations ?? null) : null;
+    const mat = (R: number[] | null | undefined) => (R ? R.map((x) => x.toFixed(9)).join(',') : '');
+    const orientKey = plates ? `plates:${(plateRs ?? []).map(mat).join('|')}` : mat(params.orientation);
     if (tSrc !== oSrc || orientKey !== oKey) {
-      oModel = tSrc ? orientModelLike(tSrc, tSrc, params.orientation) : null;
-      oOrig = srcModel && tSrc && tSrc !== srcModel ? orientModelLike(srcModel, tSrc, params.orientation) : oModel;
-      oPlace = tSrc ? orientPlacement(tSrc, params.orientation) : null;
+      if (plates) {
+        oModel = tSrc ? orientPlatesLike(tSrc, tSrc, plates, plateRs) : null;
+        oOrig = srcModel && tSrc && tSrc !== srcModel ? orientPlatesLike(srcModel, tSrc, plates, plateRs) : oModel;
+        oPlace = null; // only the assemble tool reads it, and plates never come with an assembly
+      } else {
+        oModel = tSrc ? orientModelLike(tSrc, tSrc, params.orientation) : null;
+        oOrig = srcModel && tSrc && tSrc !== srcModel ? orientModelLike(srcModel, tSrc, params.orientation) : oModel;
+        oPlace = tSrc ? orientPlacement(tSrc, params.orientation) : null;
+      }
       oSrc = tSrc; oKey = orientKey;
     }
     const model = oModel; // textured shape (geometry)
@@ -398,7 +409,8 @@ export function createPipeline(): Pipeline {
       axis: params.axis,
       projection: geom.mode === 'paint' ? params.projection : 'planar',
       cylinder: g.cyl,
-      orientation: geom.mode === 'paint' ? params.orientation : null,
+      orientation: geom.mode === 'paint' && !plates ? params.orientation : null,
+      plateOrientations: geom.mode === 'paint' && plates ? plateRs : null,
       orientPlace: geom.mode === 'paint' && oPlace ? { R: oPlace.R.slice(), t: [...oPlace.t] as Vec3 } : null,
       model: geom.mode === 'paint' ? origModel : null,
       faceSkins: sSkins.map((k) => ({ ...k, mesh: cloneMesh(k.mesh)! })),
@@ -416,6 +428,7 @@ export function createPipeline(): Pipeline {
 
   /** No image yet: the (textured, oriented) model in one base color, framed like a square image would be. */
   const plainResult = (model: Model, origModel: Model, params: Params, t0: number): Result => {
+    const plates = origModel.plates;
     const geom = computeGeom({ width: 64, height: 64, data: new Uint8ClampedArray(64 * 64 * 4) }, model, params);
     const cloneMesh = (m: Mesh): Mesh => ({ vertices: m.vertices.slice(), triangles: m.triangles.slice() });
     return {
@@ -426,7 +439,8 @@ export function createPipeline(): Pipeline {
       axis: params.axis,
       projection: params.projection,
       cylinder: geom.cyl,
-      orientation: params.orientation,
+      orientation: plates ? null : params.orientation,
+      plateOrientations: plates ? (params.plateOrientations ?? null) : null,
       orientPlace: oPlace ? { R: oPlace.R.slice(), t: [...oPlace.t] as Vec3 } : null,
       model: origModel,
       faceSkins: [],

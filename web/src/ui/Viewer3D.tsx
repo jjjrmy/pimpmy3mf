@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { Mesh as CoreMesh, FaceTexture, PaintedFace, Result, Vec3 } from '../core/types';
+import type { Mesh as CoreMesh, FaceTexture, ModelPlates, PaintedFace, Result, Vec3 } from '../core/types';
+import { plateCentre } from '../core/plates';
 import { buildAdjacency, planarRegion, smoothRegion } from '../core/faces';
 import { angleDelta, rayAngleAbout, rayLineParam, snapGizmo } from '../core/assembly';
 import { CYL_BASIS } from '../core/cylinder';
@@ -137,6 +138,10 @@ interface Scene {
   controls: OrbitControls;
   bedGroup: THREE.Group;
   objectGroup: THREE.Group;
+  /** Multi-plate: every plate's bed (+ label), in world coordinates; framing covers it all. null = one bed. */
+  plateFrame: THREE.Box3 | null;
+  /** Multi-plate: each plate's bed box (world), indexed like the plates; label sprites carry userData.plate. */
+  plateBoxes: THREE.Box3[];
   regionMeshes: Map<number, THREE.Mesh>;
   /** Paint mode: per region index, its modifier copies (one per model object). */
   modifierMeshes: Map<number, THREE.Mesh[]>;
@@ -209,6 +214,51 @@ function subGeometry(m: CoreMesh, triangles: number[], lift?: Float32Array | nul
 const GLASS = new THREE.MeshStandardMaterial({
   color: 0xdfe8ee, transparent: true, opacity: 0.3, depthWrite: false, roughness: 0.4, metalness: 0,
 });
+
+/** Multi-plate layout in the viewport: per plate its bed centre (source plate cell, so objects keep their offset
+ * from the plate centre) and the shift that centres the whole grid on the origin. */
+function plateGrid(plates: Omit<ModelPlates, 'objectPlate'>): { centres: [number, number][]; offset: [number, number] } {
+  const centres = Array.from({ length: plates.count }, (_, p) => plateCentre(plates, p));
+  const xs = centres.map((c) => c[0]), ys = centres.map((c) => c[1]);
+  return { centres, offset: [-(Math.min(...xs) + Math.max(...xs)) / 2, -(Math.min(...ys) + Math.max(...ys)) / 2] };
+}
+
+/** "Plate N · name" label for a multi-plate bed: a camera-facing sprite in the dark viewport style. */
+function plateLabel(n: number, name: string, height: number, maxWidth: number): THREE.Sprite {
+  const text = name ? `Plate ${n} · ${name}` : `Plate ${n}`;
+  const H = 128;
+  const font = `600 64px system-ui, -apple-system, sans-serif`;
+  const canvas = document.createElement('canvas');
+  const probe = canvas.getContext('2d')!;
+  probe.font = font;
+  // the pill hugs the text; long names shrink the whole label to fit the plate width
+  const W = Math.ceil(probe.measureText(text).width + 72);
+  canvas.width = W;
+  canvas.height = H;
+  const g = canvas.getContext('2d')!;
+  g.font = font;
+  const tw = W - 8;
+  const x0 = 4;
+  g.fillStyle = 'rgba(17, 21, 31, 0.88)';
+  g.strokeStyle = 'rgba(90, 102, 130, 0.9)';
+  g.lineWidth = 3;
+  g.beginPath();
+  g.roundRect(x0, 10, tw, H - 20, (H - 20) / 2);
+  g.fill();
+  g.stroke();
+  g.fillStyle = '#d5dbea';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(text, W / 2, H / 2 + 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
+  sprite.renderOrder = 30; // labels stay readable over the objects of the plates in front
+  const w = Math.min(maxWidth, (height * W) / H);
+  sprite.scale.set(w, (w * H) / W, 1);
+  sprite.userData = { plate: n - 1, label: true };
+  return sprite;
+}
 
 function disposeGroup(group: THREE.Group) {
   group.traverse((o) => {
@@ -477,6 +527,8 @@ export function Viewer3D({
       controls,
       bedGroup,
       objectGroup,
+      plateFrame: null,
+      plateBoxes: [],
       regionMeshes: new Map(),
       modifierMeshes: new Map(),
       partMeshes: new Map(),
@@ -578,28 +630,85 @@ export function Viewer3D({
       }
       resetView(b);
     };
+    // multi-plate: a click on a plate label (no tool active) glides to that plate; double-click returns to all
+    const down = { x: 0, y: 0 };
+    const onDown = (e: PointerEvent) => {
+      down.x = e.clientX;
+      down.y = e.clientY;
+    };
+    const onUp = (e: PointerEvent) => {
+      if (e.button !== 0 || toolRef.current || !b.plateBoxes.length) return;
+      if (Math.hypot(e.clientX - down.x, e.clientY - down.y) >= 5) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      ray.setFromCamera(ndc, b.camera);
+      const labels = b.bedGroup.children.filter((o) => o.userData.label);
+      const hit = ray.intersectObjects(labels, false)[0];
+      const box = hit ? b.plateBoxes[hit.object.userData.plate as number] : undefined;
+      if (box) resetView(b, box);
+    };
     canvas.addEventListener('dblclick', onDblClick);
-    return () => canvas.removeEventListener('dblclick', onDblClick);
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointerup', onUp);
+    return () => {
+      canvas.removeEventListener('dblclick', onDblClick);
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointerup', onUp);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ---- bed grid ------------------------------------------------------------------------------
+  // one bed of the chosen printer's size, or for a multi-plate project one per plate (centred on its source cell)
+  const platesKey = result?.mode === 'paint' && result.model?.plates
+    ? JSON.stringify((({ count, bed: sb, bedOrigin, names }) => ({ count, bed: sb, bedOrigin, names }))(result.model.plates))
+    : '';
   useEffect(() => {
     const b = sceneRef.current;
     if (!b) return;
+    b.bedGroup.traverse((o) => ((o as THREE.Sprite).isSprite ? ((o as THREE.Sprite).material.map?.dispose()) : undefined));
     disposeGroup(b.bedGroup);
     const [bw, bd] = bed;
     const size = Math.max(bw, bd);
-    const grid = new THREE.GridHelper(size, Math.round(size / 10), 0x3a4256, 0x252a3a);
-    grid.rotation.x = Math.PI / 2;
-    b.bedGroup.add(grid);
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(bw, bd),
-      new THREE.MeshBasicMaterial({ color: 0x11151f, transparent: true, opacity: 0.6, side: THREE.DoubleSide }),
-    );
-    plane.position.z = -0.05;
-    b.bedGroup.add(plane);
-  }, [bed]);
+    const addBed = (cx: number, cy: number) => {
+      const grid = new THREE.GridHelper(size, Math.round(size / 10), 0x3a4256, 0x252a3a);
+      grid.rotation.x = Math.PI / 2;
+      grid.position.set(cx, cy, 0);
+      b.bedGroup.add(grid);
+      const plane = new THREE.Mesh(
+        new THREE.PlaneGeometry(bw, bd),
+        new THREE.MeshBasicMaterial({ color: 0x11151f, transparent: true, opacity: 0.6, side: THREE.DoubleSide }),
+      );
+      plane.position.set(cx, cy, -0.05);
+      b.bedGroup.add(plane);
+    };
+    b.plateFrame = null;
+    b.plateBoxes = [];
+    b.bedGroup.position.set(0, 0, 0);
+    if (!platesKey) {
+      addBed(0, 0);
+      return;
+    }
+    const plates = JSON.parse(platesKey) as Omit<ModelPlates, 'objectPlate'>;
+    const { centres, offset } = plateGrid(plates);
+    const frame = new THREE.Box3();
+    centres.forEach(([cx, cy], p) => {
+      addBed(cx, cy);
+      const label = plateLabel(p + 1, plates.names[p] ?? '', Math.min(bd * 0.16, 44), bw);
+      // in the gap in front of the plate (Bambu's grid leaves 0.2 x bed between plates)
+      label.position.set(cx, cy - bd / 2 - label.scale.y / 2 - 3, 0.5);
+      b.bedGroup.add(label);
+      const box = new THREE.Box3(
+        new THREE.Vector3(cx - bw / 2 + offset[0], cy - bd / 2 - label.scale.y - 6 + offset[1], 0),
+        new THREE.Vector3(cx + bw / 2 + offset[0], cy + bd / 2 + offset[1], 0),
+      );
+      b.plateBoxes.push(box);
+      frame.union(box);
+    });
+    b.bedGroup.position.set(offset[0], offset[1], 0);
+    b.plateFrame = frame;
+  }, [bed, platesKey]);
 
   // ---- rebuild geometry on new result --------------------------------------------------------
   useEffect(() => {
@@ -757,7 +866,13 @@ export function Viewer3D({
     b.objectGroup.position.set(0, 0, 0);
     b.objectGroup.updateMatrixWorld(true);
     const box = printedBox(b);
-    if (!box.isEmpty()) {
+    const plates = result.mode === 'paint' ? result.model?.plates : undefined;
+    if (!box.isEmpty() && plates) {
+      // multi-plate: objects stay where they are on their plates; the plate grid (bed effect) is what gets centred
+      const { offset } = plateGrid(plates);
+      b.objectGroup.position.set(offset[0], offset[1], -box.min.z);
+      b.objectGroup.updateMatrixWorld(true);
+    } else if (!box.isEmpty()) {
       const c = new THREE.Vector3();
       box.getCenter(c);
       b.objectGroup.position.set(-c.x, -c.y, -box.min.z);
@@ -1495,9 +1610,11 @@ function printedBox(b: Scene): THREE.Box3 {
 }
 
 /** The default framing of what prints: camera position, orbit target and clip planes (null = nothing to frame). */
-function fitView(b: Scene): { position: THREE.Vector3; target: THREE.Vector3; near: number; far: number } | null {
-  const box = printedBox(b);
+function fitView(b: Scene, focus?: THREE.Box3): { position: THREE.Vector3; target: THREE.Vector3; near: number; far: number } | null {
+  const box = focus ? focus.clone() : printedBox(b);
   if (box.isEmpty()) return null;
+  // multi-plate: frame every plate, not just the objects
+  if (!focus && b.plateFrame) box.union(b.plateFrame);
   const sphere = new THREE.Sphere();
   box.getBoundingSphere(sphere);
   const r = Math.max(sphere.radius, 1);
@@ -1505,7 +1622,8 @@ function fitView(b: Scene): { position: THREE.Vector3; target: THREE.Vector3; ne
   const vfov = (b.camera.fov * Math.PI) / 180;
   const hfov = 2 * Math.atan(Math.tan(vfov / 2) * b.camera.aspect);
   const fov = Math.min(vfov, hfov);
-  const dist = (r / Math.sin(fov / 2)) * 1.25;
+  // a flat plate grid's bounding sphere overstates what is in view; frame it tighter
+  const dist = (r / Math.sin(fov / 2)) * (!focus && b.plateFrame ? 0.95 : 1.25);
   const dir = new THREE.Vector3(0.75, -1, 0.7).normalize();
   return {
     target: sphere.center.clone(),
@@ -1527,9 +1645,9 @@ function fitCamera(b: Scene) {
   b.controls.update();
 }
 
-/** Glide back to the default framing (double-click). The render loop runs the tween. */
-function resetView(b: Scene) {
-  const fit = fitView(b);
+/** Glide back to the default framing (double-click), or to `focus` (a plate). The render loop runs the tween. */
+function resetView(b: Scene, focus?: THREE.Box3) {
+  const fit = fitView(b, focus);
   if (!fit) return;
   // clip planes wide enough for both ends of the glide; the loop settles them on the fit's at the end
   b.camera.near = Math.min(b.camera.near, fit.near);

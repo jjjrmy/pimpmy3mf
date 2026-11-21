@@ -33,6 +33,8 @@ export interface ModelInfo {
   sources: { itemId: string; object: number; part: number }[][];
   /** Assembly: the loaded files in order, with their current placement. */
   items: { itemId: string; fileName: string; transform: Rigid; parts: number; triangles: number }[];
+  /** Build plates of a multi-plate Bambu / Orca project (2+); absent = one plate. */
+  plates?: number;
 }
 
 export interface Placement {

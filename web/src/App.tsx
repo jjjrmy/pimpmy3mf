@@ -142,6 +142,9 @@ function trianglesArea(mesh: Mesh, tris: number[]): number {
   return area;
 }
 
+/** The whole lay-on-face pose (one undo step): whole-model, or per plate for a multi-plate project. */
+type OrientState = Pick<Params, 'orientation' | 'plateOrientations'>;
+
 /** Stable id for a painted face (survives re-orientation and setting changes). */
 function faceId(): string {
   return typeof crypto !== 'undefined' && crypto.randomUUID
@@ -304,8 +307,8 @@ export default function App() {
 
   // ---- paint tools (lay-on-face / paint-face) ------------------------------------------------
   const [activeTool, setActiveTool] = useState<ViewportTool | null>(null);
-  /** Undo stack of prior orientations (each entry = the pose before one lay-on-face). */
-  const [orientHistory, setOrientHistory] = useState<(number[] | null)[]>([]);
+  /** Undo stack of prior orientations (each entry = the whole pose before one lay-on-face). */
+  const [orientHistory, setOrientHistory] = useState<OrientState[]>([]);
   /** Paint-face brush: the palette index to paint with, or null = eraser. Default: index 1 (0 when N=1). */
   const [brush, setBrush] = useState<number | null>(1);
   /** Texture-face tool: settings for the next selection, and eraser mode. */
@@ -365,7 +368,7 @@ export default function App() {
   useEffect(() => {
     setActiveTool(null);
     setOrientHistory([]);
-    patchParams({ orientation: null, paintedFaces: [], textures: [] });
+    patchParams({ orientation: null, plateOrientations: null, paintedFaces: [], textures: [] });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelToken]);
 
@@ -391,20 +394,29 @@ export default function App() {
     const src = resultRun?.layout.sources[pick.objectIndex]?.[pick.partIndex];
     const corr = src ? corrections.get(src.itemId) : undefined;
     const normal = corr ? rotateVec(corr, pick.normal) : pick.normal;
-    const newO = mulMat3(rotationToDown(normal), res.orientation ?? IDENTITY3);
-    setOrientHistory((h) => [...h, params.orientation]);
-    patchParams({ orientation: newO });
+    setOrientHistory((h) => [...h, { orientation: params.orientation, plateOrientations: params.plateOrientations ?? null }]);
+    const plates = res.model?.plates;
+    if (plates) {
+      // multi-plate: only the picked object's plate turns (all its objects together)
+      const p = plates.objectPlate[pick.objectIndex] ?? 0;
+      const cur = res.plateOrientations ?? [];
+      const next = Array.from({ length: plates.count }, (_, i) => cur[i] ?? null);
+      next[p] = mulMat3(rotationToDown(normal), cur[p] ?? IDENTITY3);
+      patchParams({ plateOrientations: next });
+    } else {
+      patchParams({ orientation: mulMat3(rotationToDown(normal), res.orientation ?? IDENTITY3) });
+    }
     setActiveTool(null); // exiting the tool after a successful lay is fine
   };
   const onUndoOrient = () => {
     if (!orientHistory.length) return;
     const prev = orientHistory[orientHistory.length - 1];
     setOrientHistory(orientHistory.slice(0, -1));
-    patchParams({ orientation: prev });
+    patchParams(prev);
   };
   const onResetOrient = () => {
     setOrientHistory([]);
-    patchParams({ orientation: null });
+    patchParams({ orientation: null, plateOrientations: null });
   };
 
   // Commit a whole brush stroke in one update: one paintedFaces change -> one debounced pipeline run +
@@ -726,6 +738,9 @@ export default function App() {
         setAsmHistory([]);
         applyInfo(info, true);
         rest = models.slice(1);
+        if (info.plates && !rest.length) {
+          toast({ kind: 'info', title: `${info.plates} plates`, message: 'Each build plate keeps its own objects and layout.' });
+        }
       }
       if (rest.length) {
         const before = snapshot();
@@ -1454,6 +1469,7 @@ export default function App() {
           paintedFaces: params.paintedFaces,
           textures: params.textures,
           orientation: params.orientation,
+          plateOrientations: params.plateOrientations ?? null,
           image: image ? { blob: image.blob, name: image.name, presetId: selectedPresetId } : null,
           perPart: params.perPart,
           perPartChoice: perPartChoiceRef.current ?? undefined,
@@ -1469,7 +1485,7 @@ export default function App() {
     }, 1000);
     return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asmItems, asmSources, hiddenParts, params.paintedFaces, params.textures, params.orientation, params.perPart, image, selectedPresetId]);
+  }, [asmItems, asmSources, hiddenParts, params.paintedFaces, params.textures, params.orientation, params.plateOrientations, params.perPart, image, selectedPresetId]);
 
   // a model with several printable parts in one object (a multi-part 3MF, or an assembly of 2+ files) turns
   // Per-part on, so each part keeps its camo when printed on its own; unless the user already chose for this
@@ -1531,7 +1547,7 @@ export default function App() {
         const hidden = new Set<string>();
         info.sources.forEach((row, j) => row.forEach((src, k) => state.hiddenItems.includes(src.itemId) && hidden.add(`${j}:${k}`)));
         setHiddenParts(hidden);
-        setParams((p) => ({ ...p, paintedFaces: state.paintedFaces, textures: state.textures, orientation: state.orientation }));
+        setParams((p) => ({ ...p, paintedFaces: state.paintedFaces, textures: state.textures, orientation: state.orientation, plateOrientations: state.plateOrientations ?? null }));
         if (state.perPartChoice) {
           perPartChoiceRef.current = state.perPartChoice;
           patchParams({ perPart: !!state.perPart });
@@ -1753,7 +1769,7 @@ export default function App() {
                 <ViewportTools
                   activeTool={activeTool}
                   onToolChange={onToolChange}
-                  hasOrientation={params.orientation != null}
+                  hasOrientation={params.orientation != null || !!params.plateOrientations?.some(Boolean)}
                   canUndo={orientHistory.length > 0}
                   onUndo={onUndoOrient}
                   onReset={onResetOrient}

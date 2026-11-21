@@ -28,6 +28,13 @@ Both use the same algorithm.
   - Each color becomes a Bambu modifier volume.
   - Multi-part and multi-object 3MFs keep their structure: parts stay separate and named, and
     every object gets its own modifiers.
+  - **Multi-plate projects:** a Bambu Studio / OrcaSlicer project with several build plates shows one
+    bed per plate (labelled with its plate name), each with its objects where they were. Lay-on-face
+    turns only the picked object's plate. The Bambu project export keeps every object on its plate at
+    the same offset from the plate centre; a plate that no longer fits the chosen printer's bed is
+    centred on it (with a warning). Limits: a plain .3mf has no plates, so its objects keep their
+    plate-grid positions side by side; PrusaSlicer multi-bed and other formats load as one plate;
+    adding a second file to the assembly (or moving the file) drops the plates.
   - **Per-part modifiers** (checkbox, shown for multi-part models): every part becomes its own object
     with its own cropped modifiers, so each part can go on its own plate in any orientation. The camo
     stays exactly where it was in the assembled pose, so the seams line up after assembly.
@@ -145,6 +152,7 @@ src/core/         geometry + file formats (no DOM; runs in the Web Worker and un
   trace.ts          planar-graph boundary chains, smoothing, simplification, rings
   extrude.ts        manifold extrusion (0.5 µm inset), paint-mode prisms
   meshio.ts         STL/OBJ/3MF loading (structure kept), STL writing
+  plates.ts         multi-plate (Bambu plate grid) helpers, lay-on-face per plate
   threemf.ts        plain 3MF + Bambu project writer
   bambu/            per printer × nozzle project templates, flush volumes
 src/shared/       filament data: slimming, CIELAB, CIEDE2000, ranking (used by app + worker)
@@ -160,6 +168,7 @@ scripts/
   validate-bambu.ts           build projects and slice them with the Bambu Studio CLI
   validate-studio-compat.ts   every printer x case, sliced in Bambu Studio 1.10 and 2.8
   validate-tower.ts           prime tower vs the no-print area, beds and models, every printer x nozzle
+  validate-plates.ts          multi-plate 3MF: load, per-plate lay-on-face, plate-preserving export, sliced in 1.10 + 2.8
   render-gcode.py             top-down G-code render colored by filament (used by the validator)
   presets/                    camo presets: fetch_camos.py (discover) -> build_presets.py (WebP + manifest)
                               -> upload_r2.py (to the R2 bucket); output in git-ignored presets-data/
