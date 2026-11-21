@@ -6,6 +6,8 @@ import { Icon } from './Icons';
 interface ActionBarProps {
   /** No result yet: every export is disabled. */
   disabled: boolean;
+  /** Why the exports are disabled (shown as a tooltip on the export buttons), when there's something to say. */
+  disabledReason?: string;
   busy: ExportKind | null;
   /** `printerId` is passed for the Bambu project so the export uses the popover's choice right away. */
   onExport: (kind: ExportKind, printerId?: string) => void;
@@ -94,7 +96,7 @@ export function ActionBar(props: ActionBarProps) {
           Per-part: {props.perPart && props.perPartAvailable ? 'ON' : 'OFF'}
         </button>
 
-        <div className="actionbar-actions">
+        <div className="actionbar-actions" title={props.disabledReason}>
           <button type="button" className="pill" disabled={disabled || busyAny} onClick={() => props.onExport('stl-zip')}>
             {busy === 'stl-zip' ? '…' : '.stl'}
           </button>

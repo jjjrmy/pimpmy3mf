@@ -331,6 +331,11 @@ export interface Result {
     ms: number; // wall time of this run
   };
   warnings: string[];
+  /**
+   * A model loaded before any camo / image: the parts in one neutral base color (textures and lay-on-face applied),
+   * no color regions or modifiers. The view, assemble and texture tools work on it; exports wait for a camo.
+   */
+  plain?: boolean;
 }
 
 export interface RunOptions {
@@ -345,7 +350,7 @@ export interface Pipeline {
    * image/model object identity and the params each stage depends on, so e.g. a thickness change only
    * re-extrudes. Returned arrays are owned by the caller (never mutated or reused afterwards).
    */
-  run(image: RasterImage, model: Model | null, params: Params, opts?: RunOptions): Promise<Result>;
+  run(image: RasterImage | null, model: Model | null, params: Params, opts?: RunOptions): Promise<Result>;
   /** Frees WASM objects and caches. */
   dispose(): void;
 }

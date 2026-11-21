@@ -2519,3 +2519,70 @@ input[type='color'] {
   margin-top: 6px;
   font-size: 12px;
 }
+
+/* ---- model shown before a camo: a nudge toward the Paint tab (not a block over the model) ---- */
+.camo-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 13;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: calc(100% - 300px);
+  padding: 6px 13px 6px 10px;
+  background: var(--yellow);
+  color: var(--ink);
+  border: 2px solid var(--panel-edge);
+  border-radius: 999px;
+  box-shadow: 0 2px 0 var(--yellow-dark), 0 6px 16px rgba(13, 71, 102, 0.28);
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  letter-spacing: 0.3px;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  animation: run-pill-in 0.18s ease-out;
+}
+.camo-hint span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.camo-hint:hover {
+  background: var(--yellow-2);
+}
+.camo-hint:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+@media (max-width: 900px) {
+  .camo-hint {
+    max-width: calc(100% - 20px);
+    top: auto;
+    bottom: 52px;
+  }
+}
+.tab.has-attention {
+  position: relative;
+}
+.tab-dot {
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--lime);
+  border: 1.5px solid var(--panel-edge);
+  animation: tab-dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes tab-dot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.7; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-dot { animation: none; }
+}

@@ -282,6 +282,9 @@ export default function App() {
   ]);
 
   const [result, setResult] = useState<Result | null>(null);
+  /** The shown result is a plain (no camo yet) preview; read by handlers declared above the derived state. */
+  const resultPlainRef = useRef(false);
+  resultPlainRef.current = !!result?.plain;
   const [running, setRunning] = useState(false);
   const [stage, setStage] = useState<string | null>(null);
   /** How far the current stage is (0..1), when the worker reports it. */
@@ -533,6 +536,7 @@ export default function App() {
 
   /** Activating the Texture face tool brings up its settings in the TEXTURE tab. */
   const onToolChange = (tool: ViewportTool | null) => {
+    if (tool === 'paint' && resultPlainRef.current) return; // paint face needs the camo's palette
     setActiveTool(tool);
     if (tool === 'texture') setTab('texture');
     // mates are solved in assembly space even while the assembly is laid on a face (picks are mapped back)
@@ -964,7 +968,8 @@ export default function App() {
   const cancelledDepsRef = useRef<readonly unknown[] | null>(null);
   const runTimerRef = useRef(0);
   useEffect(() => {
-    if (!image) return;
+    // a model with no camo yet still runs: it shows plain (textures, lay-on-face and assemble all work on it)
+    if (!image && !(mode === 'paint' && model)) return;
     if (mode === 'paint' && !model) return;
     const cancelled = cancelledDepsRef.current;
     if (cancelled && cancelled.every((d, i) => d === runDeps[i])) return;
@@ -987,8 +992,10 @@ export default function App() {
           setRunning(false);
           setStage(null);
           setFraction(null);
-          setOverrides((prev) => (prev.length === res.regions.length ? prev : new Array(res.regions.length).fill(null)));
-          setHidden((prev) => new Set([...prev].filter((i) => i < res.regions.length)));
+          if (!res.plain) {
+            setOverrides((prev) => (prev.length === res.regions.length ? prev : new Array(res.regions.length).fill(null)));
+            setHidden((prev) => new Set([...prev].filter((i) => i < res.regions.length)));
+          }
         })
         .catch((err: Error) => {
           if (err instanceof CancelledError || err.name === 'Cancelled') return;
@@ -1023,18 +1030,23 @@ export default function App() {
   }, [result]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- derived -------------------------------------------------------------------------------
-  const hexes = useMemo(() => (result ? result.regions.map((r, i) => overrides[i] ?? r.hex) : []), [result, overrides]);
+  /** A model shown before any camo: one base color, no regions to edit, nothing to export yet. */
+  const plain = !!result?.plain;
+  const hexes = useMemo(
+    () => (result ? result.regions.map((r, i) => (result.plain ? r.hex : (overrides[i] ?? r.hex))) : []),
+    [result, overrides],
+  );
   // keep the paint brush within the current palette (a shrink clamps it; the eraser stays null)
   useEffect(() => {
     const n = hexes.length;
-    if (n === 0) return;
+    if (n === 0 || plain) return;
     setBrush((b) => (b === null ? null : Math.min(b, n - 1)));
   }, [hexes.length]);
   const bed = useMemo<[number, number]>(() => {
     const p = PRINTERS.find((pr) => pr.id === printerId) ?? PRINTERS[0];
     return p.bed;
   }, [printerId]);
-  const fitKey = `${mode}|${result?.regions.length ?? 0}|${params.axis}|${geomToken}`;
+  const fitKey = `${mode}|${mode === 'paint' ? '' : (result?.regions.length ?? 0)}|${params.axis}|${geomToken}`;
 
   const onExport = (kind: ExportKind, chosenPrinterId: string = printerId) => {
     setExportBusy(kind);
@@ -1571,17 +1583,17 @@ export default function App() {
   const showOverlay = showLoading && busy && !result;
   const showPill = showLoading && busy && !!result;
 
-  const emptyTitle = !image && !model ? 'Drop an image or a model' : model && !image ? 'Add an image to paint' : 'Generating…';
+  const emptyTitle = !image && !model ? 'Drop an image or a model' : model && !image ? 'Loading your model…' : 'Generating…';
   const emptyBody =
     !image && !model
       ? 'Drop a picture to tile it, or drop a model to paint it — anywhere on the page.'
       : model && !image
-        ? 'Pick a camo in the Paint tab, or drag an image anywhere.'
+        ? 'It shows here in a moment. Then pick a camo in the Paint tab, or drag an image anywhere.'
         : 'Your multi-color print will appear here.';
 
   const legend = (
     <Legend
-      regions={result?.regions ?? []}
+      regions={plain ? [] : (result?.regions ?? [])}
       hexes={hexes}
       hidden={hidden}
       mode={mode}
@@ -1623,7 +1635,7 @@ export default function App() {
         <div className="panel">
           <div className="panel-left">
             <h2 className="panel-heading">Design Your Print:</h2>
-            <TabStrip active={tab} onChange={setTab} />
+            <TabStrip active={tab} onChange={setTab} attention={plain && tab !== 'paint' ? 'paint' : null} />
             <div className="panel-left-body">
               <div role="tabpanel" id="panel-paint" aria-labelledby="tab-paint" hidden={tab !== 'paint'}>
                 <PaintTab
@@ -1746,6 +1758,7 @@ export default function App() {
                   onUndo={onUndoOrient}
                   onReset={onResetOrient}
                   colors={hexes}
+                  paintAvailable={!plain}
                   brush={brush}
                   onBrush={setBrush}
                   textureErase={textureErase}
@@ -1764,7 +1777,7 @@ export default function App() {
 
               {hasResult && (
                 <div className="viewport-topright">
-                  {(mode === 'paint' || !!result?.base) && (
+                  {((mode === 'paint' && !plain) || !!result?.base) && (
                     <label className="viewport-prisms toggle toggle-inline">
                       <input type="checkbox" checked={showModifiers} onChange={(e) => setShowModifiers(e.target.checked)} />
                       <span>Show modifier prisms</span>
@@ -1800,6 +1813,13 @@ export default function App() {
                 </div>
               )}
 
+              {plain && !busy && !error && (
+                <button type="button" className="camo-hint" onClick={() => setTab('paint')} title="Open the Paint tab">
+                  <Icon name="brush" />
+                  <span>Pick a camo or drop an image to paint it</span>
+                </button>
+              )}
+
               {(!!error || !!result || !busy) && (
                 <div className="viewport-status">
                   <StatusLine error={error} result={result} stale={busy && !error} />
@@ -1819,7 +1839,8 @@ export default function App() {
             </div>
 
             <ActionBar
-              disabled={!hasResult}
+              disabled={!hasResult || plain}
+              disabledReason={plain ? 'Pick a camo or drop an image first' : undefined}
               busy={exportBusy}
               onExport={onExport}
               printers={PRINTERS}

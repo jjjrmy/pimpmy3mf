@@ -62,6 +62,8 @@ interface ViewportToolsProps {
   onReset: () => void;
   /** Current palette colors ('#RRGGBB'), filament order — the paint-face brush swatches. */
   colors: string[];
+  /** False before a camo is picked: paint face needs the palette, so its button is disabled. */
+  paintAvailable?: boolean;
   /** Active brush: palette index to paint with, or null = eraser. */
   brush: number | null;
   onBrush: (brush: number | null) => void;
@@ -99,6 +101,7 @@ export function ViewportTools({
   onUndo,
   onReset,
   colors,
+  paintAvailable = true,
   brush,
   onBrush,
   textureErase,
@@ -140,14 +143,15 @@ export function ViewportTools({
         className={`vtool${activeTool === 'paint' ? ' is-active' : ''}`}
         onClick={() => toggle('paint')}
         aria-pressed={activeTool === 'paint'}
-        title={tip('paint', 'Paint a face in one color')}
+        disabled={!paintAvailable}
+        title={paintAvailable ? tip('paint', 'Paint a face in one color') : 'Pick a camo first: paint face uses its colors'}
       >
         <span className="vtool-icon" aria-hidden>
           <Icon name="brush" />
         </span>
         <span className="vtool-label">Paint face</span>
       </button>
-      {activeTool === 'paint' && (
+      {activeTool === 'paint' && paintAvailable && (
         <div className="vtool-brush" role="group" aria-label="Brush color">
           {colors.map((c, i) => (
             <button

@@ -266,6 +266,10 @@ export function StatusLine({ error, result, stale = false }: StatusLineProps) {
         <Icon name="warning" /> {error}
       </div>;
   if (!result) return stale ? null : <div className="status">Ready.</div>;
+  if (result.plain) return <div className={`status${stale ? ' is-stale' : ''}`}>
+        <span>Plain preview</span>
+        <span className="status-dim">no camo yet</span>
+      </div>;
   const { stats, tile } = result;
   // result.warnings surface as toasts now, not inline here
   return (

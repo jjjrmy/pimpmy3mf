@@ -20,6 +20,9 @@ import { ShellCache, clipRegionsToShells, splitTile } from './shell';
 
 const MAX_CELLS = 6_000_000;
 
+/** Neutral base color of a model shown before any camo is picked (a plain grey filament). */
+export const PLAIN_RGB: RGB = [154, 158, 164];
+
 // uvw = xyz @ R (row-major 3x3). det +1. u = image right, v = image up, w = projection depth.
 const AXIS_R: Record<Axis, number[]> = {
   z: [1, 0, 0, 0, 1, 0, 0, 0, 1],
@@ -175,7 +178,7 @@ export function createPipeline(): Pipeline {
   let dInner: (Uint32Array | null)[][] | null = null;
   let dInnerMesh: (Mesh | null)[][] | null = null;
 
-  const run = async (image: RasterImage, srcModel: Model | null, params: Params, opts?: RunOptions): Promise<Result> => {
+  const run = async (image: RasterImage | null, srcModel: Model | null, params: Params, opts?: RunOptions): Promise<Result> => {
     const t0 = performance.now();
     const wasm = await initManifold();
 
@@ -210,6 +213,11 @@ export function createPipeline(): Pipeline {
     }
     const model = oModel; // textured shape (geometry)
     const origModel = oOrig; // as-loaded triangles (result.model, picking, painted faces)
+
+    if (!image) {
+      if (!model || !origModel) throw new Error('Load an image first.');
+      return plainResult(model, origModel, params, t0);
+    }
 
     const geom = computeGeom(image, model, params) as Geom & { ox: number; oy: number };
 
@@ -403,6 +411,33 @@ export function createPipeline(): Pipeline {
         : null,
       stats: { imageW: image.width, imageH: image.height, gridW: g.nx, gridH: g.ny, pitch: g.qx, ms },
       warnings: geom.mode === 'paint' && tWarn.length ? [...gWarn, ...tWarn] : gWarn.slice(),
+    };
+  };
+
+  /** No image yet: the (textured, oriented) model in one base color, framed like a square image would be. */
+  const plainResult = (model: Model, origModel: Model, params: Params, t0: number): Result => {
+    const geom = computeGeom({ width: 64, height: 64, data: new Uint8ClampedArray(64 * 64 * 4) }, model, params);
+    const cloneMesh = (m: Mesh): Mesh => ({ vertices: m.vertices.slice(), triangles: m.triangles.slice() });
+    return {
+      mode: 'paint',
+      regions: [{ index: 0, rgb: [...PLAIN_RGB] as RGB, hex: toHex(PLAIN_RGB), coverage: 1, rings: [], mesh: null, objectMeshes: null, partMeshes: null }],
+      frame: { x0: geom.bx0, y0: geom.by0, x1: geom.bx1, y1: geom.by1 },
+      tile: { w: geom.tw, h: geom.th, repeat: geom.tile, wraps: geom.wraps },
+      axis: params.axis,
+      projection: params.projection,
+      cylinder: geom.cyl,
+      orientation: params.orientation,
+      orientPlace: oPlace ? { R: oPlace.R.slice(), t: [...oPlace.t] as Vec3 } : null,
+      model: origModel,
+      faceSkins: [],
+      depth: null,
+      innerFaces: null,
+      innerMeshes: null,
+      base: null,
+      shaped: tChanged ? model.objects.map((o, j) => o.parts.map((p, k) => (tChanged![j]?.[k] ? cloneMesh(p.mesh) : null))) : null,
+      stats: { imageW: 0, imageH: 0, gridW: 0, gridH: 0, pitch: 0, ms: performance.now() - t0 },
+      warnings: tWarn.slice(),
+      plain: true,
     };
   };
 

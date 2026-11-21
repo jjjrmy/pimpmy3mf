@@ -271,7 +271,8 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
         break;
       }
       case 'run': {
-        if (!image) throw new Error('Load an image first.');
+        // no image yet: a loaded model still runs (textures + lay-on-face) and shows plain
+        if (!image && !(msg.useModel && model)) throw new Error('Load an image first.');
         if (currentSignal) currentSignal.cancelled = true;
         const signal = { cancelled: false };
         currentSignal = signal;
@@ -298,6 +299,7 @@ ctx.onmessage = async (e: MessageEvent<Request>) => {
       }
       case 'export': {
         if (!lastResult) throw new Error('Nothing to export yet — generate a result first.');
+        if (lastResult.plain) throw new Error('Pick a camo or drop an image first.');
         const result = await doExport(lastResult, msg.kind, msg.opts);
         const buf = result.bytes.buffer as ArrayBuffer;
         post({ type: 'export:ok', reqId: msg.reqId, result }, [buf]);

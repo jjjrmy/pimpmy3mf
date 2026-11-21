@@ -10,7 +10,8 @@ export const TABS: { id: TabId; label: string }[] = [
 ];
 
 /** The chunky yellow tab strip. Full `role=tablist` with roving focus + arrow-key navigation. */
-export function TabStrip({ active, onChange }: { active: TabId; onChange: (id: TabId) => void }) {
+/** `attention`: a tab to nudge toward (a small pulsing dot), e.g. Paint while a model has no camo yet. */
+export function TabStrip({ active, onChange, attention = null }: { active: TabId; onChange: (id: TabId) => void; attention?: TabId | null }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const onKeyDown = (e: React.KeyboardEvent, i: number) => {
@@ -41,11 +42,12 @@ export function TabStrip({ active, onChange }: { active: TabId; onChange: (id: T
             aria-selected={selected}
             aria-controls={`panel-${t.id}`}
             tabIndex={selected ? 0 : -1}
-            className={`tab${selected ? ' is-active' : ''}`}
+            className={`tab${selected ? ' is-active' : ''}${attention === t.id ? ' has-attention' : ''}`}
             onClick={() => onChange(t.id)}
             onKeyDown={(e) => onKeyDown(e, i)}
           >
             {t.label}
+            {attention === t.id && <span className="tab-dot" aria-label="(pick a camo here)" />}
           </button>
         );
       })}
